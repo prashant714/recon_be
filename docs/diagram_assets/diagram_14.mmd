@@ -1,0 +1,7 @@
+flowchart LR
+    OPS1["Exception Controller"] --> EX["Exception Records"]
+    OPS2["Transaction Controller"] --> TX["Transactions"]
+    OPS3["Settlement Controller"] --> ST["Settlements"]
+    OPS4["Dashboard Controller"] --> KP["Metrics and Summary"]
+    OPS5["Admin Controller"] --> RP["Replay and Poll Operations"]
+    RP --> AU["Audit Logs"]

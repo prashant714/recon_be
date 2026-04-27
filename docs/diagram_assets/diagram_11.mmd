@@ -1,0 +1,19 @@
+sequenceDiagram
+    autonumber
+    participant GapJob as "Gap Filler Job"
+    participant RP as "Razorpay Polling Service"
+    participant SP as "Stripe Polling Service"
+    participant Ingestion as "Webhook Ingestion Service"
+
+    GapJob->>GapJob: compute from and to window
+    GapJob->>RP: fetchPayments and fetchRefunds
+    RP-->>GapJob: synthetic webhook payload bytes
+    loop "razorpay payloads"
+        GapJob->>Ingestion: ingestAsync payload razorpay polling
+    end
+
+    GapJob->>SP: fetchCharges and fetchRefunds
+    SP-->>GapJob: synthetic webhook payload bytes
+    loop "stripe payloads"
+        GapJob->>Ingestion: ingestAsync payload stripe polling
+    end

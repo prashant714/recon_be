@@ -1,0 +1,49 @@
+{
+  "entity": "event",
+  "account_id": "acc_BFQ7uQEaa7j2z7",
+  "event": "payment.failed",
+  "contains": [
+    "payment"
+  ],
+  "payload": {
+    "payment": {
+      "entity": {
+        "id": "pay_RZP_FAIL_001",
+        "entity": "payment",
+        "amount": 15000,
+        "currency": "INR",
+        "status": "failed",
+        "order_id": "order_RZP_002",
+        "invoice_id": null,
+        "international": false,
+        "method": "card",
+        "amount_refunded": 0,
+        "amount_transferred": 0,
+        "refund_status": null,
+        "captured": false,
+        "description": "Phase 1 failure sample",
+        "card_id": "card_RZP_002",
+        "bank": null,
+        "wallet": null,
+        "vpa": null,
+        "email": "failed@example.com",
+        "contact": "8888888888",
+        "notes": {},
+        "fee": null,
+        "tax": null,
+        "error_code": "BAD_REQUEST_ERROR",
+        "error_description": "Payment was declined",
+        "created_at": 1710000600,
+        "card": {
+          "id": "card_RZP_002",
+          "entity": "card",
+          "name": "Declined User",
+          "last4": "4242",
+          "network": "Visa",
+          "type": "debit"
+        }
+      }
+    }
+  },
+  "created_at": 1710000600
+}

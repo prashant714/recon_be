@@ -1,0 +1,72 @@
+erDiagram
+    WEBHOOK_EVENTS ||--o{ TRANSACTIONS : "drives processing"
+    USERS ||--o{ TRANSACTIONS : "resolved userId"
+    EXCEPTION_RECORDS ||--o{ TRANSACTIONS : "linked via exceptionId"
+    SETTLEMENTS ||--o{ TRANSACTIONS : "linked by settlementId"
+    AUDIT_LOGS {
+      bigint id
+      string actor
+      string action
+      string entity_type
+      bigint entity_id
+      json old_value
+      json new_value
+      inet ip_address
+      datetime created_at
+    }
+    WEBHOOK_EVENTS {
+      bigint id
+      string provider
+      string provider_event_id
+      string event_type
+      json payload
+      boolean processed
+      datetime received_at
+      datetime processed_at
+      string processing_error
+      string source
+    }
+    TRANSACTIONS {
+      bigint id
+      string provider
+      string provider_transaction_id
+      string merchant_id
+      string order_id
+      string provider_order_id
+      bigint parent_transaction_id
+      string event_type
+      string status
+      string reconciliation_status
+      bigint user_id
+      bigint exception_id
+      string settlement_id
+      datetime event_occurred_at
+    }
+    USERS {
+      bigint id
+      string merchant_id
+      string email
+      string phone
+      string name
+      datetime first_seen_at
+      datetime last_seen_at
+    }
+    EXCEPTION_RECORDS {
+      bigint id
+      string merchant_id
+      string exception_type
+      string severity
+      string status
+      bigint transaction_id
+      bigint settlement_id
+      datetime detected_at
+      datetime resolved_at
+    }
+    SETTLEMENTS {
+      bigint id
+      string provider
+      string provider_settlement_id
+      string merchant_id
+      string settlement_status
+      datetime settled_at
+    }

@@ -1,0 +1,18 @@
+spring:
+  jpa:
+    show-sql: false
+  datasource:
+    hikari:
+      maximum-pool-size: 20
+
+server:
+  port: 8080
+
+logging:
+  level:
+    com.reconciliation: INFO
+    root: WARN
+
+springdoc:
+  swagger-ui:
+    enabled: false

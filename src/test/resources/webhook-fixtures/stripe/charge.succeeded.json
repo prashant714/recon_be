@@ -1,0 +1,56 @@
+{
+  "id": "evt_STRIPE_CHARGE_SUCCESS_001",
+  "object": "event",
+  "api_version": "2024-06-20",
+  "created": 1710001000,
+  "type": "charge.succeeded",
+  "data": {
+    "object": {
+      "id": "ch_STRIPE_001",
+      "object": "charge",
+      "amount": 2000,
+      "amount_captured": 2000,
+      "currency": "usd",
+      "status": "succeeded",
+      "captured": true,
+      "payment_intent": "pi_STRIPE_001",
+      "receipt_email": "stripepayer@example.com",
+      "balance_transaction": "txn_STRIPE_001",
+      "billing_details": {
+        "email": "stripepayer@example.com",
+        "name": "Stripe Payer",
+        "phone": null,
+        "address": {
+          "city": null,
+          "country": "US",
+          "line1": null,
+          "line2": null,
+          "postal_code": "94103",
+          "state": null
+        }
+      },
+      "payment_method_details": {
+        "type": "card",
+        "card": {
+          "brand": "visa",
+          "last4": "4242",
+          "network": "visa",
+          "exp_month": 12,
+          "exp_year": 2026,
+          "fingerprint": "Xt5EWLLDS7FJjR1c",
+          "funding": "credit",
+          "country": "US"
+        }
+      },
+      "metadata": {
+        "merchant_order_ref": "MO-2001"
+      }
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": "req_124",
+    "idempotency_key": null
+  }
+}

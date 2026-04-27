@@ -1,0 +1,13 @@
+package com.reconciliation.common.enums;
+
+public enum ExceptionType {
+    UNMATCHED_PAYMENT,
+    UNMATCHED_REFUND,
+    AMOUNT_MISMATCH,
+    MISSING_CAPTURE,
+    DUPLICATE_CAPTURE,
+    SETTLEMENT_DISCREPANCY,
+    ORPHAN_REFUND,
+    STATUS_MISMATCH,
+    FEE_DISCREPANCY
+}

@@ -1,0 +1,30 @@
+{
+  "id": "evt_STRIPE_PAYOUT_001",
+  "object": "event",
+  "api_version": "2024-06-20",
+  "created": 1710001400,
+  "type": "payout.paid",
+  "data": {
+    "object": {
+      "id": "po_STRIPE_001",
+      "object": "payout",
+      "amount": 150000,
+      "currency": "usd",
+      "status": "paid",
+      "method": "standard",
+      "type": "bank_account",
+      "automatic": true,
+      "arrival_date": 1710086400,
+      "description": "STRIPE PAYOUT",
+      "statement_descriptor": "STRIPE",
+      "balance_transaction": "txn_STRIPE_PAYOUT_001",
+      "destination": "ba_STRIPE_001"
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "entity": "event",
+  "account_id": "acc_BFQ7uQEaa7j2z7",
+  "event": "payment.authorized",
+  "contains": [
+    "payment"
+  ],
+  "payload": {
+    "payment": {
+      "entity": {
+        "id": "pay_RZP_AUTH_001",
+        "entity": "payment",
+        "amount": 10000,
+        "currency": "INR",
+        "status": "authorized",
+        "order_id": "order_RZP_001",
+        "invoice_id": null,
+        "international": false,
+        "method": "card",
+        "amount_refunded": 0,
+        "refund_status": null,
+        "captured": false,
+        "description": "Phase 1 auth sample",
+        "card_id": "card_RZP_001",
+        "bank": null,
+        "wallet": null,
+        "vpa": null,
+        "email": "payer@example.com",
+        "contact": "9999999999",
+        "notes": {
+          "merchant_order_ref": "MO-1001"
+        },
+        "amount_transferred": 0,
+        "fee": null,
+        "tax": null,
+        "error_code": null,
+        "error_description": null,
+        "created_at": 1710000000,
+        "card": {
+          "id": "card_RZP_001",
+          "entity": "card",
+          "name": "Test User",
+          "last4": "1111",
+          "network": "Visa",
+          "type": "credit"
+        }
+      }
+    }
+  },
+  "created_at": 1710000000
+}

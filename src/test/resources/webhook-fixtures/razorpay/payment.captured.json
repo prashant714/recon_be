@@ -1,0 +1,42 @@
+{
+  "entity": "event",
+  "account_id": "acc_BFQ7uQEaa7j2z7",
+  "event": "payment.captured",
+  "contains": [
+    "payment"
+  ],
+  "payload": {
+    "payment": {
+      "entity": {
+        "id": "pay_RZP_CAP_001",
+        "entity": "payment",
+        "amount": 10000,
+        "currency": "INR",
+        "status": "captured",
+        "order_id": "order_RZP_001",
+        "invoice_id": null,
+        "international": false,
+        "method": "upi",
+        "amount_refunded": 0,
+        "refund_status": null,
+        "captured": true,
+        "description": "Phase 1 capture sample",
+        "bank": null,
+        "wallet": null,
+        "vpa": "customer@upi",
+        "email": null,
+        "contact": null,
+        "notes": {
+          "merchant_order_ref": "MO-1001"
+        },
+        "amount_transferred": 0,
+        "fee": 236,
+        "tax": 36,
+        "error_code": null,
+        "error_description": null,
+        "created_at": 1710000300
+      }
+    }
+  },
+  "created_at": 1710000300
+}

@@ -1,0 +1,9 @@
+sequenceDiagram
+    autonumber
+    participant Processing as "Transaction Processing Service"
+    participant EventRepo as "Webhook Event Repository"
+
+    Processing->>EventRepo: findById webhookEventId
+    EventRepo-->>Processing: webhook event
+    Processing-->>Processing: exception during normalize or upsert
+    Processing->>EventRepo: save processed true and processingError

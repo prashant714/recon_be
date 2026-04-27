@@ -1,0 +1,7 @@
+flowchart TD
+    CAND["Rule Candidate Transaction"] --> CHECK["Rule Condition Check"]
+    CHECK -->|"match"| MATCHED["Set ReconciliationStatus MATCHED"]
+    CHECK -->|"violation"| CREATE["Create ExceptionRecord"]
+    CREATE --> EXSET["Set ReconciliationStatus EXCEPTION and exceptionId"]
+    MATCHED --> SAVE["Save Transaction"]
+    EXSET --> SAVE

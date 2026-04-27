@@ -1,0 +1,9 @@
+flowchart LR
+    DC["Dashboard Controller"] --> DS["Dashboard Service"]
+    DS --> TR1["TransactionRepository countSince"]
+    DS --> TR2["TransactionRepository countByReconciliationStatusSince"]
+    DS --> TR3["TransactionRepository findProviderSummarySince"]
+    DS --> ER1["ExceptionRecordRepository countOpenExceptions"]
+    DS --> ER2["ExceptionRecordRepository countByTypeForMerchant"]
+    DS --> ER3["ExceptionRecordRepository recent page"]
+    DS --> RESP["Summary and Metrics JSON Response"]

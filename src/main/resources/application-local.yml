@@ -1,0 +1,22 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5433/reconciliation_dev
+    username: recon_user
+    password: recon_pass
+  jpa:
+    show-sql: true
+
+server:
+  port: 8080
+
+logging:
+  level:
+    com.reconciliation: DEBUG
+    org.springframework.security: DEBUG
+    org.flywaydb: INFO
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*"

@@ -1,0 +1,37 @@
+sequenceDiagram
+    autonumber
+    participant Provider as "Provider"
+    participant Controller as "Webhook Controller"
+    participant Signature as "Signature Service"
+    participant Ingestion as "Webhook Ingestion Service"
+    participant EventRepo as "Webhook Event Repository"
+    participant Processing as "Transaction Processing Service"
+    participant Norm as "Normalization Service"
+    participant UserSvc as "User Identity Service"
+    participant TxSvc as "Transaction Service"
+
+    Provider->>Controller: POST webhook payload and signature
+    Controller->>Signature: verify payload signature
+    Signature-->>Controller: valid
+    Controller->>Ingestion: ingestAsync rawBody provider webhook
+    Ingestion->>EventRepo: save webhook event
+    EventRepo-->>Ingestion: saved webhook event id
+    Ingestion->>Processing: processAsync webhookEventId provider
+
+    Processing->>EventRepo: findById webhookEventId
+    EventRepo-->>Processing: webhook event payload
+    Processing->>Norm: normalize by provider and event type
+    Norm-->>Processing: canonical transaction
+
+    alt "payer details present"
+        Processing->>UserSvc: resolveUserId merchantId email phone name
+        UserSvc-->>Processing: userId
+    end
+
+    alt "event type refund"
+        Processing->>TxSvc: linkRefundToParent transaction payload provider
+    end
+
+    Processing->>TxSvc: upsert transaction
+    TxSvc-->>Processing: persisted transaction
+    Processing->>EventRepo: save processed true

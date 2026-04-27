@@ -1,0 +1,27 @@
+{
+  "id": "evt_STRIPE_PI_SUCCESS_001",
+  "object": "event",
+  "api_version": "2024-06-20",
+  "created": 1710001000,
+  "type": "payment_intent.succeeded",
+  "data": {
+    "object": {
+      "id": "pi_STRIPE_001",
+      "object": "payment_intent",
+      "amount": 2000,
+      "currency": "usd",
+      "status": "succeeded",
+      "receipt_email": "stripepayer@example.com",
+      "latest_charge": "ch_STRIPE_001",
+      "metadata": {
+        "merchant_order_ref": "MO-2001"
+      }
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": "req_123",
+    "idempotency_key": null
+  }
+}

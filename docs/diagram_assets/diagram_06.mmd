@@ -1,0 +1,7 @@
+flowchart TD
+    A["Incoming Canonical Transaction"] --> B["Find Existing by provider and providerTransactionId"]
+    B -->|"not found"| C["Insert New Transaction"]
+    B -->|"found"| D["Compare eventOccurredAt"]
+    D -->|"incoming older or equal"| E["Skip Update Return Current"]
+    D -->|"incoming newer"| F["Merge Mutable Fields"]
+    F --> G["Save Updated Transaction"]

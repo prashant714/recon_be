@@ -1,0 +1,10 @@
+sequenceDiagram
+    autonumber
+    participant Provider as "Provider"
+    participant Ingestion as "Webhook Ingestion Service"
+    participant EventRepo as "Webhook Event Repository"
+
+    Provider->>Ingestion: resend same event
+    Ingestion->>EventRepo: save provider and providerEventId
+    EventRepo-->>Ingestion: unique key violation
+    Ingestion-->>Ingestion: duplicate ignored

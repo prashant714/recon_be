@@ -1,0 +1,57 @@
+{
+  "id": "evt_STRIPE_REFUND_001",
+  "object": "event",
+  "api_version": "2024-06-20",
+  "created": 1710001200,
+  "type": "charge.refunded",
+  "data": {
+    "object": {
+      "id": "ch_STRIPE_001",
+      "object": "charge",
+      "amount": 2000,
+      "amount_captured": 2000,
+      "amount_refunded": 500,
+      "currency": "usd",
+      "status": "succeeded",
+      "captured": true,
+      "payment_intent": "pi_STRIPE_001",
+      "balance_transaction": "txn_STRIPE_001",
+      "billing_details": {
+        "email": "stripepayer@example.com",
+        "name": "Stripe Payer",
+        "phone": null
+      },
+      "payment_method_details": {
+        "type": "card",
+        "card": {
+          "brand": "visa",
+          "last4": "4242",
+          "network": "visa",
+          "exp_month": 12,
+          "exp_year": 2026,
+          "funding": "credit",
+          "country": "US"
+        }
+      },
+      "refunds": {
+        "object": "list",
+        "data": [
+          {
+            "id": "re_STRIPE_001",
+            "object": "refund",
+            "amount": 500,
+            "currency": "usd",
+            "charge": "ch_STRIPE_001",
+            "payment_intent": "pi_STRIPE_001"
+          }
+        ]
+      }
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": "req_126",
+    "idempotency_key": null
+  }
+}

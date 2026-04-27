@@ -1,0 +1,9 @@
+flowchart LR
+    REQ["Incoming HTTP Request"] --> RL["Rate Limit Filter"]
+    RL --> JWT["Jwt Filter"]
+    JWT --> SC["Security Config Authorization"]
+
+    SC -->|"/webhooks/** permit"| WEB["Webhook Controllers"]
+    SC -->|"/actuator health and prometheus permit"| ACT["Actuator Endpoints"]
+    SC -->|"/swagger and /api-docs permit"| DOC["API Docs"]
+    SC -->|"all other routes require auth"| API["Protected API Controllers"]

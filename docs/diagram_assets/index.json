@@ -1,0 +1,86 @@
+[
+  {
+    "i": 1,
+    "title": "System Architecture",
+    "mmd": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_01.mmd",
+    "svg": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_01.svg"
+  },
+  {
+    "i": 2,
+    "title": "Request Security Chain",
+    "mmd": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_02.mmd",
+    "svg": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_02.svg"
+  },
+  {
+    "i": 3,
+    "title": "Webhook Success Flow",
+    "mmd": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_03.mmd",
+    "svg": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_03.svg"
+  },
+  {
+    "i": 4,
+    "title": "Duplicate Webhook Flow",
+    "mmd": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_04.mmd",
+    "svg": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_04.svg"
+  },
+  {
+    "i": 5,
+    "title": "Processing Error Flow",
+    "mmd": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_05.mmd",
+    "svg": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_05.svg"
+  },
+  {
+    "i": 6,
+    "title": "Transaction Upsert Decision",
+    "mmd": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_06.mmd",
+    "svg": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_06.svg"
+  },
+  {
+    "i": 7,
+    "title": "Reconciliation Engine Run",
+    "mmd": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_07.mmd",
+    "svg": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_07.svg"
+  },
+  {
+    "i": 8,
+    "title": "Rule Outcome Pattern",
+    "mmd": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_08.mmd",
+    "svg": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_08.svg"
+  },
+  {
+    "i": 9,
+    "title": "Exception Lifecycle",
+    "mmd": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_09.mmd",
+    "svg": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_09.svg"
+  },
+  {
+    "i": 10,
+    "title": "Admin Replay Flow",
+    "mmd": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_10.mmd",
+    "svg": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_10.svg"
+  },
+  {
+    "i": 11,
+    "title": "Gap Filler Flow",
+    "mmd": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_11.mmd",
+    "svg": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_11.svg"
+  },
+  {
+    "i": 12,
+    "title": "Dashboard Metrics Flow",
+    "mmd": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_12.mmd",
+    "svg": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_12.svg"
+  },
+  {
+    "i": 13,
+    "title": "Data Model Relationships",
+    "mmd": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_13.mmd",
+    "svg": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_13.svg"
+  },
+  {
+    "i": 14,
+    "title": "Operational Views",
+    "mmd": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_14.mmd",
+    "svg": "/Users/prashantpandey/Downloads/demo/docs/diagram_assets/diagram_14.svg"
+  }
+]

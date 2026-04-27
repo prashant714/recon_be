@@ -1,0 +1,16 @@
+sequenceDiagram
+    autonumber
+    participant Job as "Reconciliation Job"
+    participant Engine as "Reconciliation Engine"
+    participant Rule as "Reconciliation Rule"
+
+    Job->>Engine: runAll
+    loop "for each discovered rule"
+        Engine->>Rule: evaluate
+        alt "rule success"
+            Rule-->>Engine: completed
+        else "rule failure"
+            Rule-->>Engine: exception
+            Engine-->>Engine: log and continue
+        end
+    end

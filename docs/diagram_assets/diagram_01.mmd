@@ -1,0 +1,50 @@
+flowchart LR
+    P1["Razorpay"] --> W1["Razorpay Webhook Controller"]
+    P2["Stripe"] --> W2["Stripe Webhook Controller"]
+
+    W1 --> SIG1["Razorpay Signature Service"]
+    W2 --> SIG2["Stripe Signature Service"]
+
+    W1 --> ING["Webhook Ingestion Service"]
+    W2 --> ING
+
+    ING --> WE["Webhook Event Repository"]
+    ING --> TPS["Transaction Processing Service"]
+
+    TPS --> NORM["Normalization Service"]
+    TPS --> TSVC["Transaction Service"]
+    TPS --> USVC["User Identity Service"]
+    TSVC --> TR["Transaction Repository"]
+    USVC --> UR["User Repository"]
+
+    JOB1["Reconciliation Job"] --> ENG["Reconciliation Engine"]
+    ENG --> R1["Exact Id Match Rule"]
+    ENG --> R2["Missing Capture Rule"]
+    ENG --> R3["Orphan Refund Rule"]
+    ENG --> R4["Duplicate Capture Rule"]
+    ENG --> R5["Settlement Total Rule"]
+
+    R1 --> EXS["Exception Record Service"]
+    R2 --> EXS
+    R3 --> EXS
+    R4 --> EXS
+    R5 --> EXS
+    EXS --> EXR["Exception Record Repository"]
+
+    JOB2["Gap Filler Job"] --> RPOLL["Razorpay Polling Service"]
+    JOB2 --> SPOLL["Stripe Polling Service"]
+    RPOLL --> ING
+    SPOLL --> ING
+
+    API1["Dashboard Controller"] --> DS["Dashboard Service"]
+    DS --> TR
+    DS --> EXR
+
+    API2["Exception Controller"] --> EXR
+    API2 --> AUD["Audit Service"]
+    AUD --> AUR["Audit Log Repository"]
+
+    API3["Admin Controller"] --> ADMS["Admin Service"]
+    ADMS --> WE
+    ADMS --> TPS
+    ADMS --> AUD

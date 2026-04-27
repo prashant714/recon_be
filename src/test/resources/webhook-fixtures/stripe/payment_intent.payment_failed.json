@@ -1,0 +1,26 @@
+{
+  "id": "evt_STRIPE_PI_FAIL_001",
+  "object": "event",
+  "api_version": "2024-06-20",
+  "created": 1710001100,
+  "type": "payment_intent.payment_failed",
+  "data": {
+    "object": {
+      "id": "pi_STRIPE_002",
+      "object": "payment_intent",
+      "amount": 2000,
+      "currency": "usd",
+      "status": "requires_payment_method",
+      "receipt_email": "failed-stripe@example.com",
+      "last_payment_error": {
+        "message": "Your card was declined."
+      }
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": "req_125",
+    "idempotency_key": null
+  }
+}

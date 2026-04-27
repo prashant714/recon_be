@@ -1,0 +1,17 @@
+sequenceDiagram
+    autonumber
+    participant Admin as "Admin Client"
+    participant Controller as "Admin Controller"
+    participant Service as "Admin Service"
+    participant EventRepo as "Webhook Event Repository"
+    participant Processing as "Transaction Processing Service"
+    participant Audit as "Audit Service"
+
+    Admin->>Controller: POST replay with webhookEventId
+    Controller->>Service: replay webhookEventId actor ip
+    Service->>EventRepo: findById
+    EventRepo-->>Service: webhook event
+    Service->>EventRepo: save reset processing flags
+    Service->>Processing: processAsync webhookEventId provider
+    Service->>Audit: log webhook_replayed
+    Service-->>Controller: status queued

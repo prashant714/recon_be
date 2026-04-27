@@ -1,0 +1,9 @@
+stateDiagram-v2
+    [*] --> OPEN
+    OPEN --> IN_REVIEW: "Ops starts review"
+    IN_REVIEW --> RESOLVED: "Issue fixed"
+    IN_REVIEW --> IGNORED: "Accepted as non actionable"
+    OPEN --> RESOLVED: "Direct resolution"
+    OPEN --> IGNORED: "Direct ignore"
+    RESOLVED --> [*]
+    IGNORED --> [*]

@@ -1,0 +1,41 @@
+{
+  "id": "evt_STRIPE_DISPUTE_001",
+  "object": "event",
+  "api_version": "2024-06-20",
+  "created": 1710001300,
+  "type": "charge.dispute.created",
+  "data": {
+    "object": {
+      "id": "dp_STRIPE_001",
+      "object": "dispute",
+      "amount": 2000,
+      "currency": "usd",
+      "payment_intent": "pi_STRIPE_001",
+      "charge": "ch_STRIPE_001",
+      "reason": "fraudulent",
+      "status": "warning_needs_response",
+      "is_charge_refundable": true,
+      "network_reason_code": "4853",
+      "balance_transactions": [],
+      "evidence_details": {
+        "due_by": 1712678400,
+        "has_evidence": false,
+        "past_due": false,
+        "submission_count": 0
+      },
+      "evidence": {
+        "customer_email_address": null,
+        "customer_name": null,
+        "product_description": null,
+        "shipping_documentation": null,
+        "uncategorized_text": null
+      }
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  }
+}

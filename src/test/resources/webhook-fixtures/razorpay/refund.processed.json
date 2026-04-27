@@ -1,0 +1,48 @@
+{
+  "entity": "event",
+  "account_id": "acc_E7OQJcEANmBHTC",
+  "event": "refund.processed",
+  "contains": [
+    "refund",
+    "payment"
+  ],
+  "payload": {
+    "refund": {
+      "entity": {
+        "id": "rfnd_RZP_001",
+        "entity": "refund",
+        "amount": 5000,
+        "currency": "INR",
+        "payment_id": "pay_RZP_CAP_001",
+        "notes": {
+          "comment": "Customer requested refund"
+        },
+        "receipt": null,
+        "acquirer_data": {
+          "arn": null
+        },
+        "created_at": 1710000900,
+        "batch_id": null,
+        "status": "processed",
+        "speed_processed": "normal",
+        "speed_requested": "optimum"
+      }
+    },
+    "payment": {
+      "entity": {
+        "id": "pay_RZP_CAP_001",
+        "entity": "payment",
+        "amount": 10000,
+        "currency": "INR",
+        "status": "captured",
+        "order_id": "order_RZP_001",
+        "method": "upi",
+        "vpa": "customer@upi",
+        "email": null,
+        "contact": null,
+        "created_at": 1710000300
+      }
+    }
+  },
+  "created_at": 1710000900
+}
