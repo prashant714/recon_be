@@ -1,6 +1,7 @@
 package com.reconciliation.polling.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.stripe.Stripe;
 import com.stripe.model.Charge;
 import com.stripe.model.ChargeCollection;
 import com.stripe.model.Refund;
@@ -8,6 +9,7 @@ import com.stripe.model.RefundCollection;
 import com.stripe.param.ChargeListParams;
 import com.stripe.param.RefundListParams;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -18,13 +20,23 @@ import java.util.List;
 public class StripePollingService {
 
     private final ObjectMapper objectMapper;
+    private final String secretKey;
 
-    public StripePollingService(ObjectMapper objectMapper) {
+    public StripePollingService(
+            ObjectMapper objectMapper,
+            @Value("${app.stripe.secret-key:}") String secretKey) {
         this.objectMapper = objectMapper;
+        this.secretKey = secretKey;
     }
 
     public List<byte[]> fetchCharges(OffsetDateTime from, OffsetDateTime to) {
         List<byte[]> results = new ArrayList<>();
+        if (!hasUsableCredentials()) {
+            log.info("Skipping Stripe charges polling because a real API key is not configured");
+            return results;
+        }
+        Stripe.apiKey = secretKey;
+
         String startingAfter = null;
 
         try {
@@ -67,6 +79,12 @@ public class StripePollingService {
 
     public List<byte[]> fetchRefunds(OffsetDateTime from, OffsetDateTime to) {
         List<byte[]> results = new ArrayList<>();
+        if (!hasUsableCredentials()) {
+            log.info("Skipping Stripe refunds polling because a real API key is not configured");
+            return results;
+        }
+        Stripe.apiKey = secretKey;
+
         String startingAfter = null;
 
         try {
@@ -103,5 +121,11 @@ public class StripePollingService {
         }
 
         return results;
+    }
+
+    private boolean hasUsableCredentials() {
+        return secretKey != null
+                && !secretKey.isBlank()
+                && !secretKey.contains("placeholder");
     }
 }

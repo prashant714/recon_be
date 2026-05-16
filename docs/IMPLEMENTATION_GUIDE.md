@@ -1,1209 +1,1230 @@
-# Reconciliation Platform — Complete Implementation Guide
-
-This document explains every part of the system end-to-end. A reader with no prior knowledge of this codebase should be able to understand what each component does, why it exists, and how everything connects.
+# Payment Reconciliation Platform — MVP Design Document
+**Version 2.0 | Scope: Razorpay + Stripe | April 2026**
 
 ---
 
 ## Table of Contents
 
-1. [What This System Does](#1-what-this-system-does)
-2. [Technology Stack](#2-technology-stack)
-3. [High-Level Architecture](#3-high-level-architecture)
-4. [Project Structure](#4-project-structure)
-5. [Security Layer](#5-security-layer)
-6. [Webhook Ingestion Flow](#6-webhook-ingestion-flow)
-7. [Transaction Processing Flow](#7-transaction-processing-flow)
-8. [Normalization — Provider to Canonical Format](#8-normalization--provider-to-canonical-format)
-9. [User Identity Resolution](#9-user-identity-resolution)
-10. [Transaction Upsert Logic](#10-transaction-upsert-logic)
-11. [Reconciliation Engine](#11-reconciliation-engine)
-12. [Reconciliation Rules Deep Dive](#12-reconciliation-rules-deep-dive)
-13. [Exception Management](#13-exception-management)
-14. [Settlement Reconciliation](#14-settlement-reconciliation)
-15. [Gap Filler — Polling for Missed Events](#15-gap-filler--polling-for-missed-events)
-16. [Admin Operations](#16-admin-operations)
-17. [Dashboard and Metrics](#17-dashboard-and-metrics)
-18. [Audit Logging](#18-audit-logging)
-19. [Scheduled Jobs Summary](#19-scheduled-jobs-summary)
-20. [Data Model](#20-data-model)
-21. [API Reference](#21-api-reference)
-22. [Configuration Reference](#22-configuration-reference)
-23. [Testing Strategy](#23-testing-strategy)
+1. [Executive Summary](#1-executive-summary)
+2. [What We Are Building (And What We Are Not)](#2-what-we-are-building)
+3. [Provider Integration — Razorpay & Stripe](#3-provider-integration)
+4. [The Golden Rule: Webhooks + Polling Fallback](#4-the-golden-rule)
+5. [Universal Data Schema](#5-universal-data-schema)
+6. [System Architecture](#6-system-architecture)
+7. [Webhook Ingestion — Implementation Detail](#7-webhook-ingestion)
+8. [Polling Fallback — Implementation Detail](#8-polling-fallback)
+9. [Settlements as a First-Class Entity](#9-settlements)
+10. [Reconciliation Engine](#10-reconciliation-engine)
+11. [User-Centric Schema for Future Fraud Detection](#11-user-centric-schema)
+12. [API Design](#12-api-design)
+13. [Frontend / Dashboard](#13-frontend-dashboard)
+14. [Tech Stack Recommendation](#14-tech-stack)
+15. [Security Checklist](#15-security)
+16. [Operational Features](#16-operational-features)
+17. [MVP Roadmap — Phased Plan](#17-mvp-roadmap)
+18. [Known Risks & Mitigation](#18-risks)
 
 ---
 
-## 1. What This System Does
+## 1. Executive Summary
 
-Payment providers like Razorpay and Stripe send webhook events whenever something happens — a payment is captured, a refund is processed, a dispute is raised. These events arrive in real time and need to be stored, normalized into a common format, and checked for correctness.
+This document describes the revised architecture for a real-time payment reconciliation platform, scoped to **Razorpay and Stripe** for the MVP. The platform ingests payment events via webhooks supplemented by a mandatory polling fallback, normalizes them into a unified schema, and applies deterministic matching rules to detect exceptions: unmatched payments, refund mismatches, amount discrepancies, and missing captures.
 
-**Reconciliation** is the process of verifying that every payment event is accounted for, matches expected amounts, and has no anomalies (missing captures, orphaned refunds, duplicate charges, settlement discrepancies).
+Key design changes from v1.0:
 
-This platform:
-
-- **Receives** webhook events from Razorpay and Stripe
-- **Verifies** each event's HMAC signature before accepting it
-- **Normalizes** provider-specific payloads into a single canonical `Transaction` format
-- **Resolves** the end-user identity behind each transaction
-- **Runs reconciliation rules** on a schedule to flag any anomalies
-- **Creates exception records** for every anomaly found
-- **Allows ops teams** to review, resolve, or ignore exceptions
-- **Polls providers** on a schedule to catch any events missed by webhooks
-- **Provides dashboards** showing match rates, open exceptions, and provider summaries
+- **Webhooks are not enough.** We mandate a polling fallback against provider APIs because webhooks are inherently unreliable. Both Razorpay and Stripe can silently drop or delay events under load.
+- **Settlements are a first-class entity.** Reconciliation happens at the settlement level — matching a batch of transactions to a single bank credit — not just at the individual transaction level.
+- **Schema is user-centric from day one.** We add `user_id` as a nullable indexed field now, even though fraud detection is a future feature. Migration later is expensive.
+- **Fees are known only at settlement, not at capture.** The matching engine must handle a "pending settlement" state for transactions that have not yet been settled.
+- **State machine ordering.** Events can arrive out of order. We apply state transitions based on event timestamps, not ingestion time.
 
 ---
 
-## 2. Technology Stack
+## 2. What We Are Building (And What We Are Not)
 
-| Component | Choice | Notes |
-|---|---|---|
-| Language | Java 21 | Uses virtual threads, switch expressions |
-| Framework | Spring Boot 3.2 | Web, Security, JPA, Actuator |
-| Database | PostgreSQL | All tables use identity columns |
-| Migrations | Flyway | V1–V8 migrations, runs on startup |
-| Scheduling | db-scheduler 14 | Distributed scheduler backed by PostgreSQL — safe for multi-instance deployments |
-| Async | Spring `@Async` | Dedicated `webhookProcessingExecutor` thread pool |
-| Auth | JWT (jjwt 0.12) | Stateless; webhook endpoints are public |
-| Rate Limiting | Bucket4j 8.10 | Token bucket, per-IP, webhooks only |
-| Razorpay SDK | razorpay-java 1.4.3 | Used for polling |
-| Stripe SDK | stripe-java 25.3 | Used for polling |
-| API Docs | SpringDoc / Swagger | Available at `/swagger-ui.html` |
-| Metrics | Micrometer + Prometheus | Exposed at `/actuator/prometheus` |
-| Build | Gradle 8 | Java 21 toolchain |
+### MVP Scope
 
----
-
-## 3. High-Level Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         INBOUND EVENTS                              │
-│                                                                     │
-│  Razorpay ──► POST /webhooks/razorpay ──►  RazorpayWebhookController│
-│  Stripe   ──► POST /webhooks/stripe   ──►  StripeWebhookController  │
-│                                                                     │
-│          Both verify HMAC signature, then call:                     │
-│                    WebhookIngestionService                          │
-│                           │                                         │
-│               ┌───────────┴────────────┐                           │
-│               ▼                        ▼                           │
-│       save WebhookEvent         TransactionProcessingService        │
-│       (raw payload)              (async, thread pool)               │
-│                                        │                           │
-│                           NormalizationService                      │
-│                           UserIdentityService                       │
-│                           TransactionService.upsert()               │
-└─────────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────────┐
-│                       SCHEDULED JOBS                                │
-│                                                                     │
-│  ReconciliationJob (every 5 min) ──► ReconciliationEngine           │
-│                                           │                         │
-│                     ┌──────────┬──────────┼──────────┬──────────┐  │
-│                     ▼          ▼          ▼          ▼          ▼  │
-│               ExactIdMatch  Missing   OrphanRefund  Duplicate  Settlement│
-│               Rule         Capture                 Capture    Total │
-│                                                                     │
-│  GapFillerJob (every 15 min) ──► RazorpayPollingService             │
-│                               └─► StripePollingService              │
-│                               both feed ──► WebhookIngestionService │
-│                                                                     │
-│  SettlementReconcilerJob (2 AM daily) ──► close SETTLED settlements │
-│                                      └─► flag overdue PENDING ones  │
-└─────────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────────┐
-│                        OPERATIONS APIs                              │
-│                                                                     │
-│  GET  /api/v1/dashboard/summary     ──► DashboardService            │
-│  GET  /api/v1/exceptions            ──► ExceptionQueryService       │
-│  GET  /api/v1/transactions          ──► TransactionQueryService     │
-│  GET  /api/v1/settlements           ──► SettlementService           │
-│  POST /api/v1/admin/replay          ──► AdminService                │
-│  POST /api/v1/admin/poll            ──► AdminService (live poll)    │
-│  POST /api/v1/admin/settlement-reconciler/run ──► manual trigger    │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 4. Project Structure
-
-```
-src/main/java/com/reconciliation/
-│
-├── webhook/                         # Inbound webhook handling
-│   ├── controller/                  # RazorpayWebhookController, StripeWebhookController
-│   └── service/                     # WebhookIngestionService, TransactionProcessingService
-│                                    # RazorpaySignatureService, StripeSignatureService
-│
-├── webhook_event/                   # Raw event storage
-│   ├── entity/WebhookEvent.java
-│   └── repository/WebhookEventRepository.java
-│
-├── transaction/                     # Canonical transaction model
-│   ├── controller/TransactionController.java
-│   ├── entity/Transaction.java
-│   ├── repository/TransactionRepository.java
-│   └── service/                     # NormalizationService, TransactionService
-│                                    # TransactionQueryService
-│
-├── user/                            # Payer identity resolution
-│   ├── entity/User.java
-│   ├── repository/UserRepository.java
-│   └── service/UserIdentityService.java
-│
-├── reconciliation/                  # Reconciliation engine and rules
-│   ├── service/ReconciliationEngine.java
-│   ├── rules/                       # ExactIdMatchRule, MissingCaptureRule,
-│   │                                # OrphanRefundRule, DuplicateCaptureRule,
-│   │                                # SettlementTotalRule, ReconciliationRule (interface)
-│   └── job/                         # ReconciliationJob, GapFillerJob,
-│                                    # SettlementReconcilerJob
-│
-├── exception_record/                # Anomaly tracking
-│   ├── controller/ExceptionController.java
-│   ├── entity/ExceptionRecord.java
-│   ├── repository/ExceptionRecordRepository.java
-│   └── service/                     # ExceptionRecordService, ExceptionQueryService
-│
-├── settlement/                      # Settlement records
-│   ├── controller/SettlementController.java
-│   ├── entity/Settlement.java
-│   ├── repository/SettlementRepository.java
-│   └── service/SettlementService.java
-│
-├── dashboard/                       # Summary metrics
-│   ├── controller/DashboardController.java
-│   └── service/DashboardService.java
-│
-├── admin/                           # Operational controls
-│   ├── controller/AdminController.java
-│   └── service/AdminService.java
-│
-├── audit/                           # Immutable audit trail
-│   ├── entity/AuditLog.java
-│   ├── repository/AuditLogRepository.java
-│   └── service/AuditService.java
-│
-├── polling/                         # Provider API polling clients
-│   ├── client/                      # RazorpayApiClient, StripeApiClient
-│   └── service/                     # RazorpayPollingService, StripePollingService
-│
-├── config/                          # Spring configuration
-│   ├── SecurityConfig.java          # JWT + route rules
-│   ├── JwtFilter.java               # Reads Bearer token, sets security context
-│   ├── JwtConfig.java               # Token generation and validation
-│   ├── RateLimitConfig.java         # Bucket4j per-IP rate limiter
-│   ├── AsyncConfig.java             # webhookProcessingExecutor thread pool
-│   ├── SchedulerConfig.java         # db-scheduler bean
-│   ├── MerchantConfig.java          # Merchant properties binding
-│   └── WebConfig.java               # CORS
-│
-└── common/
-    ├── enums/                       # Provider, EventType, TransactionStatus,
-    │                                # ReconciliationStatus, ExceptionType,
-    │                                # ExceptionStatus, Severity, SettlementStatus
-    ├── exception/                   # GlobalExceptionHandler, domain exceptions
-    └── util/                        # AmountUtils, CurrencyUtils, TimestampUtils,
-                                     # EncryptionService
-```
-
----
-
-## 5. Security Layer
-
-Every HTTP request passes through three layers before reaching a controller.
-
-### Layer 1 — Rate Limit Filter (`RateLimitConfig`)
-
-A standard servlet `Filter` registered as a Spring component. It intercepts requests to `/webhooks/**` only and applies a token-bucket rate limiter per client IP using Bucket4j.
-
-- Bucket size: **1000 requests per minute** per IP
-- Requests exceeding the limit receive HTTP 429 with `{"error":"Too many requests"}`
-- All non-webhook paths skip this filter entirely
-
-### Layer 2 — JWT Filter (`JwtFilter`)
-
-A `OncePerRequestFilter` that runs on every request. It reads the `Authorization: Bearer <token>` header, validates the JWT using `JwtConfig` (HMAC-SHA256 signed), extracts the email claim, and sets a `UsernamePasswordAuthenticationToken` in the Spring Security context.
-
-If no token is present or the token is invalid, the filter does not reject the request — it simply leaves the security context unauthenticated, and Spring Security's authorization rules handle the rest.
-
-### Layer 3 — Spring Security Authorization (`SecurityConfig`)
-
-Route-level authorization rules:
-
-| Path pattern | Rule |
+| In Scope | Out of Scope (Phase 2+) |
 |---|---|
-| `/webhooks/**` | Permit all (no JWT required — signature verified at controller level) |
-| `/actuator/health`, `/actuator/prometheus` | Permit all |
-| `/swagger-ui/**`, `/api-docs/**` | Permit all |
-| Everything else (`/api/**`) | Must be authenticated (valid JWT) |
+| Razorpay webhook ingestion | PayU, Paytm, PayPal, Adyen |
+| Stripe webhook ingestion | Bank statement CSV upload |
+| API polling fallback for both providers | Multi-currency FX reconciliation |
+| Settlement-level reconciliation | ML-based fraud detection |
+| Exception dashboard (1/7/30-day) | Chargeback workflow management |
+| Manual exception resolution with audit trail | ERP / accounting system integration |
+| User identity table (schema only, no logic) | Automated bank reconciliation |
+| Monitoring, alerting, replay | White-label / multi-tenant SaaS |
 
-Sessions are stateless (no HTTP session created). CSRF is disabled for `/webhooks/**` and `/api/**`.
+### The Core User Story
 
-### Webhook Signature Verification
+A merchant processes thousands of payments per day across Razorpay and Stripe. Every T+2 days, Razorpay settles funds to their bank account. Every few days, Stripe does the same. The merchant's finance team needs to know:
 
-Webhook controllers perform HMAC verification before any processing.
+1. Did every payment gateway transaction match an order in our system?
+2. Did the settlement amount we received in our bank match what the gateway said we'd get?
+3. Are there any unmatched refunds, failed-but-charged transactions, or amount discrepancies?
+4. When an exception is found, who reviewed it and when?
 
-**Razorpay** (`RazorpaySignatureService`):
-- Computes `HMAC-SHA256(rawBody, webhookSecret)` and hex-encodes it
-- Compares with the `X-Razorpay-Signature` header using constant-time comparison (`MessageDigest.isEqual`)
-- Returns HTTP 400 if verification fails
-
-**Stripe** (`StripeSignatureService`):
-- Reads the `Stripe-Signature` header (contains timestamp + signatures)
-- Validates using Stripe's SDK (`WebhookSignatureVerifier`)
-- Returns HTTP 400 if verification fails
+This platform answers all four questions.
 
 ---
 
-## 6. Webhook Ingestion Flow
+## 3. Provider Integration — Razorpay & Stripe
 
-This is the entry point for all payment events, whether they arrive via live webhook or via polling.
+### 3.1 Razorpay
 
-### Step-by-step
+**Webhook Events to Subscribe (MVP)**
+
+| Event | Trigger | Key Fields |
+|---|---|---|
+| `payment.authorized` | Payment authorized, not yet captured | `id`, `amount`, `currency`, `status`, `order_id`, `method`, `created_at` |
+| `payment.captured` | Payment fully captured | `id`, `amount`, `currency`, `fee`, `tax`, `order_id`, `captured_at` |
+| `payment.failed` | Payment attempt failed | `id`, `amount`, `error_code`, `error_description`, `order_id` |
+| `order.paid` | Order marked fully paid | `id`, `amount`, `amount_paid`, `status` |
+| `refund.processed` | Refund successfully processed | `id`, `amount`, `payment_id`, `status`, `speed_processed` |
+| `refund.failed` | Refund attempt failed | `id`, `payment_id`, `amount`, `status` |
+| `dispute.created` | Chargeback/dispute opened | `id`, `payment_id`, `amount`, `reason_code`, `respond_by` |
+| `settlement.processed` | Settlement created by Razorpay | `id`, `amount`, `utr`, `created_at` |
+
+**Important Razorpay Behaviors**
+
+- Signature is in header `X-Razorpay-Signature`. Computed as HMAC-SHA256 of raw request body using the webhook secret.
+- Must use the **raw body** for signature verification. Do not parse to JSON first.
+- Razorpay retries failed webhooks for up to **24 hours** with exponential backoff.
+- Webhook IPs are published by Razorpay; whitelist them at the infrastructure layer.
+- Settlement cycle is **T+2 working days** by default. Each settlement has a unique `settlement_id` and a bank **UTR number** for tracking.
+- `fee` and `tax` in the `payment.captured` payload represent the gateway fee and GST on that fee respectively. The `net_amount = amount - fee - tax`.
+- The `fee` field is **not available** in `payment.authorized` — only after capture.
+
+**Razorpay Polling API (Fallback)**
 
 ```
-Provider  ──POST──►  WebhookController
-                          │
-                    verify HMAC signature
-                          │ (fail → 400)
-                          │ (pass → continue)
-                          ▼
-                   WebhookIngestionService.ingestAsync(rawBody, provider, source)
-                          │
-                    parse JSON, extract event ID and event type
-                          │
-                    build WebhookEvent entity
-                          │
-                    webhookEventRepository.save(event)
-                          │
-                    ┌─────┴──────────────────────────────┐
-                    │  DataIntegrityViolationException?   │
-                    │  (UNIQUE provider + event_id)       │
-                    │  → duplicate, silently ignored      │
-                    └─────────────────────────────────────┘
-                          │ (saved successfully)
-                          ▼
-                   processingService.processAsync(eventId, provider)
-                          │ (returns immediately — fire-and-forget)
-                          ▼
-                   Controller returns HTTP 200 "received"
+GET https://api.razorpay.com/v1/payments?from={unix_ts}&to={unix_ts}&count=100
+GET https://api.razorpay.com/v1/refunds?from={unix_ts}&to={unix_ts}&count=100
+GET https://api.razorpay.com/v1/settlements?from={unix_ts}&to={unix_ts}&count=100
+GET https://api.razorpay.com/v1/settlements/recon/combined?year={Y}&month={M}&day={D}
 ```
 
-**Key design decisions:**
+The settlement recon endpoint is critical — it returns every individual transaction (payment, refund, adjustment) that was bundled into a settlement, along with the exact fee and net amounts. This is the ground truth for settlement reconciliation.
 
-- The controller returns `200 OK` immediately after saving the raw event. Processing happens asynchronously. This ensures the provider's retry logic is not triggered unnecessarily.
-- The `source` field on `WebhookEvent` distinguishes whether the event came from a live webhook (`"webhook"`) or from the polling gap-filler (`"polling"`) or from an admin-triggered poll (`"admin-poll"`).
-- Deduplication uses a database unique constraint on `(provider, provider_event_id)`. No application-level locking needed.
+---
 
-### WebhookEvent entity fields
+### 3.2 Stripe
 
-| Field | Description |
+**Webhook Events to Subscribe (MVP)**
+
+| Event | Trigger | Key Fields |
+|---|---|---|
+| `payment_intent.succeeded` | Payment fully succeeded | `id`, `amount`, `currency`, `status`, `customer`, `payment_method`, `created` |
+| `payment_intent.payment_failed` | Payment intent failed | `id`, `last_payment_error.code`, `last_payment_error.message` |
+| `charge.succeeded` | Charge captured | `id`, `amount`, `currency`, `payment_intent`, `balance_transaction` |
+| `charge.refunded` | Full or partial refund applied | `id`, `amount_refunded`, `refunds` |
+| `charge.dispute.created` | Chargeback opened | `id`, `amount`, `charge`, `reason`, `status` |
+| `refund.created` | Refund object created | `id`, `amount`, `charge`, `status` |
+| `payout.paid` | Stripe payout landed in bank | `id`, `amount`, `arrival_date`, `bank_account` |
+| `balance.available` | Balance updated (use for drift monitoring) | `available`, `pending` |
+
+**Important Stripe Behaviors**
+
+- Signature is in header `Stripe-Signature`. Stripe uses a timestamp+signature format: `t=timestamp,v1=signature`.
+- Must use the **raw body** for verification. Must verify within **5 minutes of the timestamp** to prevent replay attacks — Stripe enforces this.
+- Stripe retries for up to **3 days** with exponential backoff.
+- Stripe events can arrive **out of order**. A `charge.succeeded` may arrive before the corresponding `payment_intent.succeeded`. Use the event's `created` field, not ingestion time, for ordering.
+- To get fee details, call `GET /v1/balance_transactions/{id}` using the `balance_transaction` field on the charge. This is a separate API call — fees are not embedded in the webhook payload.
+- Stripe's settlement equivalent is a **payout**. A single payout can bundle many charges. The `payout_id` on a balance transaction links it back to the payout.
+
+**Stripe Polling API (Fallback)**
+
+```
+GET https://api.stripe.com/v1/charges?created[gte]={ts}&created[lte]={ts}&limit=100
+GET https://api.stripe.com/v1/refunds?created[gte]={ts}&limit=100
+GET https://api.stripe.com/v1/balance/history?type=charge&limit=100  (for fees)
+GET https://api.stripe.com/v1/payouts?created[gte]={ts}&limit=100
+```
+
+---
+
+## 4. The Golden Rule: Webhooks + Polling Fallback
+
+**Webhooks are at-most-once delivery with best-effort retries. They are not a reliable audit log. You must poll.**
+
+### Why Webhooks Alone Fail
+
+- Provider infrastructure outages silently drop events
+- Your endpoint returning a non-2xx causes retries, but only for the retry window (24h Razorpay, 3 days Stripe)
+- Events can be delivered out of order; a `refund.processed` can arrive before `payment.captured`
+- During your own deployments or downtime, you miss events that never retry
+- Razorpay explicitly says: "If a critical user-facing flow requires instant status and the webhook has not arrived, perform an immediate API fetch"
+
+### Polling Strategy
+
+We run two types of polling jobs:
+
+**Type 1 — Gap Filler (runs every 15 minutes)**
+
+Fetches all transactions from the provider APIs for the last 30 minutes (overlapping window). Compares against what's already in our database by `provider_event_id`. Inserts anything missing. This catches events we never received.
+
+**Type 2 — Settlement Reconciler (runs once daily, at 2 AM)**
+
+Fetches the full settlement report for the previous day from the provider. For Razorpay, uses the `/settlements/recon/combined` endpoint. For Stripe, fetches all balance transactions grouped by `payout_id`. This is the source of truth for fee amounts and net credits.
+
+```
+Polling Job Pseudocode (Gap Filler):
+
+every 15 minutes:
+  for each provider in [razorpay, stripe]:
+    window_start = now() - 30 minutes
+    window_end = now()
+    
+    events = provider.fetch_payments(from=window_start, to=window_end)
+    for event in events:
+      if not db.exists(provider=provider, provider_event_id=event.id):
+        normalize_and_insert(event, source="polling")
+        log("Gap filled: {provider} {event.id}")
+      else:
+        // Already exists from webhook — update if status changed
+        update_if_newer(event)
+```
+
+### Deduplication Between Webhook and Poll
+
+Both sources write to the same table. Deduplication key is `(provider, provider_event_id)`. Use an `ON CONFLICT DO UPDATE` (upsert) pattern, updating only if the incoming event has a newer timestamp than what we have. This handles the case where a webhook and a poll bring the same event in different states.
+
+---
+
+## 5. Universal Data Schema
+
+### 5.1 Core Tables
+
+#### `webhook_events` (raw ingestion log)
+
+Every incoming webhook is stored here immediately, before any processing. This is the audit log and replay source.
+
+```sql
+CREATE TABLE webhook_events (
+  id                BIGSERIAL PRIMARY KEY,
+  provider          VARCHAR(30)  NOT NULL,         -- 'razorpay' | 'stripe'
+  provider_event_id VARCHAR(120) NOT NULL,
+  event_type        VARCHAR(100) NOT NULL,          -- e.g. 'payment.captured'
+  received_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  payload           JSONB        NOT NULL,
+  signature_valid   BOOLEAN      NOT NULL,
+  source            VARCHAR(20)  NOT NULL,          -- 'webhook' | 'polling'
+  processed         BOOLEAN      NOT NULL DEFAULT FALSE,
+  processed_at      TIMESTAMPTZ,
+  processing_error  TEXT,
+  UNIQUE (provider, provider_event_id)
+);
+
+CREATE INDEX idx_webhook_events_unprocessed ON webhook_events (processed, received_at) WHERE processed = FALSE;
+CREATE INDEX idx_webhook_events_provider_event ON webhook_events (provider, provider_event_id);
+```
+
+This table has a unique constraint on `(provider, provider_event_id)`. If the same event arrives twice (retry or poll overlap), the insert fails gracefully — we do not process it twice.
+
+---
+
+#### `transactions` (normalized, unified)
+
+```sql
+CREATE TABLE transactions (
+  -- Identity
+  id                      BIGSERIAL PRIMARY KEY,
+  provider                VARCHAR(30)    NOT NULL,
+  provider_transaction_id VARCHAR(120)   NOT NULL,   -- Razorpay pay_xxx / Stripe ch_xxx
+  provider_event_id       VARCHAR(120),               -- Linked webhook event ID
+  merchant_id             VARCHAR(60)    NOT NULL,    -- Our internal merchant identifier
+  
+  -- Order Reference
+  order_id                VARCHAR(120),               -- Merchant's order/reference ID
+  provider_order_id       VARCHAR(120),               -- Provider's order ID (e.g. Razorpay order_xxx)
+  
+  -- Type and State
+  event_type              VARCHAR(30)    NOT NULL,    -- 'payment' | 'refund' | 'chargeback' | 'adjustment'
+  status                  VARCHAR(30)    NOT NULL,    -- See status enum below
+  parent_transaction_id   BIGINT REFERENCES transactions(id),  -- For refunds → original payment
+  
+  -- Amounts (always stored in smallest currency unit: paisa / cents)
+  presentment_amount      BIGINT         NOT NULL,    -- What customer paid (in presentment_currency)
+  presentment_currency    CHAR(3)        NOT NULL,
+  settlement_amount       BIGINT,                     -- What merchant receives (in settlement_currency)
+  settlement_currency     CHAR(3),
+  fee_amount              BIGINT,                     -- Gateway fee (in settlement_currency)
+  tax_amount              BIGINT,                     -- GST/tax on fee
+  net_amount              BIGINT,                     -- settlement_amount - fee_amount - tax_amount
+  
+  -- Timestamps (all UTC)
+  event_occurred_at       TIMESTAMPTZ    NOT NULL,    -- When event happened at provider
+  captured_at             TIMESTAMPTZ,
+  refunded_at             TIMESTAMPTZ,
+  ingested_at             TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
+  
+  -- Settlement Link
+  settlement_id           VARCHAR(120),               -- Foreign key to settlements table
+  settlement_date         DATE,
+  utr_number              VARCHAR(60),                -- Bank UTR for bank reconciliation
+  
+  -- Payment Method
+  payment_method          VARCHAR(30),               -- 'card' | 'upi' | 'netbanking' | 'wallet'
+  payment_method_detail   VARCHAR(60),               -- e.g. 'visa' | 'gpay' | 'sbi_netbanking'
+  card_last4              CHAR(4),
+  card_network            VARCHAR(20),               -- 'visa' | 'mastercard' | 'rupay'
+  bank                    VARCHAR(60),
+  vpa                     VARCHAR(120),              -- UPI VPA (e.g. user@okicici)
+  
+  -- Payer Identity (for future fraud detection — populated when available)
+  user_id                 BIGINT REFERENCES users(id),    -- NULL until fraud module is built
+  payer_email             VARCHAR(254),
+  payer_phone             VARCHAR(20),
+  payer_name              VARCHAR(120),
+  
+  -- Reconciliation State
+  reconciliation_status   VARCHAR(30)    NOT NULL DEFAULT 'pending',
+  -- 'pending' | 'matched' | 'exception' | 'manually_resolved' | 'ignored'
+  matched_at              TIMESTAMPTZ,
+  exception_id            BIGINT,                    -- FK to exceptions table if flagged
+  
+  -- Metadata
+  raw_payload             JSONB,                     -- Original normalized payload (prunable after 90 days)
+  notes                   JSONB,                     -- Provider-specific extra fields
+  
+  -- Audit
+  created_at              TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
+  updated_at              TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
+  
+  UNIQUE (provider, provider_transaction_id)
+);
+
+-- Status enum values:
+-- authorized | captured | failed | refunded | partially_refunded | disputed | cancelled | pending_settlement
+
+-- Indexes
+CREATE INDEX idx_txn_provider_id ON transactions (provider, provider_transaction_id);
+CREATE INDEX idx_txn_merchant_order ON transactions (merchant_id, order_id);
+CREATE INDEX idx_txn_settlement ON transactions (settlement_id);
+CREATE INDEX idx_txn_reconciliation_status ON transactions (reconciliation_status, event_occurred_at);
+CREATE INDEX idx_txn_user_id ON transactions (user_id) WHERE user_id IS NOT NULL;
+CREATE INDEX idx_txn_event_occurred ON transactions (event_occurred_at DESC);
+CREATE INDEX idx_txn_parent ON transactions (parent_transaction_id) WHERE parent_transaction_id IS NOT NULL;
+```
+
+---
+
+#### `settlements` (settlement as a first-class entity)
+
+```sql
+CREATE TABLE settlements (
+  id                    BIGSERIAL PRIMARY KEY,
+  provider              VARCHAR(30)    NOT NULL,
+  provider_settlement_id VARCHAR(120)  NOT NULL,
+  merchant_id           VARCHAR(60)    NOT NULL,
+  
+  -- What the gateway says we should receive
+  gross_amount          BIGINT         NOT NULL,   -- Sum of all captured payments
+  total_fees            BIGINT         NOT NULL,   -- Total gateway fees
+  total_tax             BIGINT         NOT NULL,   -- GST on fees
+  net_amount            BIGINT         NOT NULL,   -- gross - fees - tax (should match bank credit)
+  currency              CHAR(3)        NOT NULL,
+  
+  -- What actually arrived in the bank
+  bank_credit_amount    BIGINT,                    -- Populated after bank reconciliation
+  bank_credit_date      DATE,
+  utr_number            VARCHAR(60),               -- Bank UTR — used to match bank statement
+  
+  -- Reconciliation State
+  settlement_status     VARCHAR(30)    NOT NULL DEFAULT 'pending',
+  -- 'pending' | 'settled' | 'matched_to_bank' | 'discrepant' | 'on_hold'
+  
+  -- Metadata
+  settled_at            TIMESTAMPTZ,
+  transaction_count     INTEGER,
+  created_at            TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
+  updated_at            TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
+  
+  UNIQUE (provider, provider_settlement_id)
+);
+
+CREATE INDEX idx_settlement_merchant ON settlements (merchant_id, settled_at DESC);
+CREATE INDEX idx_settlement_utr ON settlements (utr_number) WHERE utr_number IS NOT NULL;
+```
+
+---
+
+#### `exceptions` (flagged mismatches)
+
+```sql
+CREATE TABLE exceptions (
+  id                  BIGSERIAL PRIMARY KEY,
+  merchant_id         VARCHAR(60)    NOT NULL,
+  exception_type      VARCHAR(50)    NOT NULL,
+  -- 'unmatched_payment' | 'unmatched_refund' | 'amount_mismatch' |
+  -- 'missing_capture' | 'duplicate' | 'settlement_discrepancy' |
+  -- 'orphan_refund' | 'status_mismatch' | 'fee_discrepancy'
+  
+  severity            VARCHAR(20)    NOT NULL DEFAULT 'medium',
+  -- 'low' | 'medium' | 'high' | 'critical'
+  
+  transaction_id      BIGINT REFERENCES transactions(id),
+  settlement_id       BIGINT REFERENCES settlements(id),
+  
+  -- What we expected vs what we got
+  expected_amount     BIGINT,
+  actual_amount       BIGINT,
+  discrepancy_amount  BIGINT,        -- abs(expected - actual)
+  currency            CHAR(3),
+  
+  description         TEXT           NOT NULL,
+  
+  -- Resolution
+  status              VARCHAR(30)    NOT NULL DEFAULT 'open',
+  -- 'open' | 'in_review' | 'resolved' | 'ignored'
+  resolved_by         VARCHAR(60),   -- User who resolved it
+  resolved_at         TIMESTAMPTZ,
+  resolution_notes    TEXT,
+  
+  detected_at         TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
+  updated_at          TIMESTAMPTZ    NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_exceptions_merchant_status ON exceptions (merchant_id, status, detected_at DESC);
+CREATE INDEX idx_exceptions_type ON exceptions (exception_type, detected_at DESC);
+```
+
+---
+
+#### `users` (user identity — schema-ready for fraud detection)
+
+```sql
+CREATE TABLE users (
+  id                BIGSERIAL PRIMARY KEY,
+  merchant_id       VARCHAR(60)   NOT NULL,
+  
+  -- Canonical identity fields (deduplicated)
+  email             VARCHAR(254),
+  phone             VARCHAR(20),
+  name              VARCHAR(120),
+  
+  -- Aggregated signals (updated incrementally via events)
+  first_seen_at     TIMESTAMPTZ,
+  last_seen_at      TIMESTAMPTZ,
+  total_txn_count   INTEGER       NOT NULL DEFAULT 0,
+  total_txn_amount  BIGINT        NOT NULL DEFAULT 0,   -- In paisa/cents
+  failed_txn_count  INTEGER       NOT NULL DEFAULT 0,
+  distinct_payment_methods INTEGER NOT NULL DEFAULT 0,
+  
+  -- Risk (populated by fraud module later — NULL until then)
+  risk_score        DECIMAL(5,4),
+  risk_flags        JSONB,
+  
+  created_at        TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX idx_users_email_merchant ON users (merchant_id, email) WHERE email IS NOT NULL;
+CREATE UNIQUE INDEX idx_users_phone_merchant ON users (merchant_id, phone) WHERE phone IS NOT NULL;
+```
+
+---
+
+#### `audit_logs`
+
+```sql
+CREATE TABLE audit_logs (
+  id              BIGSERIAL PRIMARY KEY,
+  actor           VARCHAR(60)   NOT NULL,   -- 'system' or user email
+  action          VARCHAR(60)   NOT NULL,   -- 'exception_resolved' | 'exception_ignored' | etc.
+  entity_type     VARCHAR(30),              -- 'exception' | 'transaction' | 'settlement'
+  entity_id       BIGINT,
+  old_value       JSONB,
+  new_value       JSONB,
+  ip_address      INET,
+  created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_audit_entity ON audit_logs (entity_type, entity_id);
+CREATE INDEX idx_audit_created ON audit_logs (created_at DESC);
+```
+
+---
+
+### 5.2 Status Normalization Map
+
+| Razorpay Status | Stripe Status | Normalized Status |
+|---|---|---|
+| `authorized` | `requires_capture` | `authorized` |
+| `captured` | `succeeded` | `captured` |
+| `failed` | `canceled` / `payment_failed` | `failed` |
+| — | `processing` | `pending` |
+| `refunded` | `refunded` | `refunded` |
+| `dispute` | `disputed` | `disputed` |
+
+---
+
+## 6. System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        INGESTION LAYER                          │
+│                                                                 │
+│  Razorpay ──webhook──►  POST /webhooks/razorpay                 │
+│  Stripe   ──webhook──►  POST /webhooks/stripe    ◄── HTTPS     │
+│                              │                                  │
+│                      ┌───────▼────────┐                        │
+│                      │ Webhook Handler │                        │
+│                      │ 1. Verify sig  │                        │
+│                      │ 2. Store raw   │                        │
+│                      │ 3. Return 200  │                        │
+│                      └───────┬────────┘                        │
+│                              │ publish                         │
+│                      ┌───────▼────────┐                        │
+│                      │  Message Queue │  (BullMQ / Redis)      │
+│                      │  webhook_events│                        │
+│                      └───────┬────────┘                        │
+│                              │ consume                         │
+│                      ┌───────▼────────┐                        │
+│                      │ Worker Pool    │                        │
+│                      │ • Normalize    │                        │
+│                      │ • Deduplicate  │                        │
+│                      │ • Upsert txn  │                        │
+│                      │ • Link user   │                        │
+│                      └───────┬────────┘                        │
+│                              │                                 │
+└──────────────────────────────┼──────────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────────┐
+│                      STORAGE LAYER                              │
+│                                                                 │
+│   PostgreSQL                                                    │
+│   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐        │
+│   │webhook_events│  │ transactions │  │ settlements  │        │
+│   └──────────────┘  └──────────────┘  └──────────────┘        │
+│   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐        │
+│   │  exceptions  │  │    users     │  │  audit_logs  │        │
+│   └──────────────┘  └──────────────┘  └──────────────┘        │
+│                                                                 │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────────┐
+│                   RECONCILIATION LAYER                          │
+│                                                                 │
+│   Reconciliation Engine (scheduled job, every 5 mins)          │
+│   ┌────────────────────────────────────────────┐               │
+│   │  1. Exact ID Match (payment ↔ provider)    │               │
+│   │  2. Refund ↔ Original Payment Match        │               │
+│   │  3. Settlement → Transaction Grouping      │               │
+│   │  4. Fee Reconciliation (post-settlement)   │               │
+│   │  5. Amount Mismatch Detection              │               │
+│   │  6. Status Drift Detection                 │               │
+│   └────────────────────────────────────────────┘               │
+│                                                                 │
+│   Polling Fallback Jobs                                         │
+│   ┌───────────────────┐  ┌──────────────────────┐             │
+│   │ Gap Filler        │  │ Settlement Reconciler │             │
+│   │ (every 15 mins)   │  │ (daily 2 AM)          │             │
+│   └───────────────────┘  └──────────────────────┘             │
+│                                                                 │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────────┐
+│                     API + DASHBOARD LAYER                       │
+│                                                                 │
+│  REST API (Node.js/Express or FastAPI)                         │
+│  React Dashboard                                               │
+│  Exception Management UI                                       │
+│  Monitoring / Metrics (Prometheus + Grafana or Datadog)        │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────┐
+│  POLLING FALLBACK (separate process)                           │
+│  Razorpay API poll ──────►                                     │
+│  Stripe API poll  ──────►  Same Queue ──► Same Workers        │
+│  (every 15 mins)          source="polling"                     │
+└──────────────────────────┘
+```
+
+---
+
+## 7. Webhook Ingestion — Implementation Detail
+
+### Step-by-Step Webhook Handler
+
+```
+POST /webhooks/razorpay
+POST /webhooks/stripe
+```
+
+The handler does **only these things**, in this order:
+
+```
+1. Read raw body as bytes (do NOT parse JSON yet)
+2. Extract signature header
+3. Verify signature:
+   Razorpay: HMAC-SHA256(raw_body, webhook_secret) == X-Razorpay-Signature
+   Stripe:   verify timestamp + v1 signature (within 5-minute window)
+4. If signature invalid → return HTTP 400, log the failure
+5. Parse JSON
+6. Extract provider_event_id
+7. INSERT INTO webhook_events (... signature_valid=true, processed=false ...)
+   ON CONFLICT (provider, provider_event_id) DO NOTHING
+8. If insert succeeded (not duplicate) → publish event_id to queue
+9. Return HTTP 200 immediately
+   (Do NOT wait for queue publish or DB write to complete response)
+```
+
+**Critical: Return 200 before any heavy work.** Stripe times out at 20 seconds; any processing delay will trigger retries. Respond immediately after inserting the raw event.
+
+### Signature Verification — Razorpay
+
+```javascript
+const crypto = require('crypto');
+
+function verifyRazorpaySignature(rawBody, signatureHeader, secret) {
+  const expectedSig = crypto
+    .createHmac('sha256', secret)
+    .update(rawBody)  // rawBody must be Buffer, not string
+    .digest('hex');
+  
+  return crypto.timingSafeEqual(
+    Buffer.from(expectedSig, 'hex'),
+    Buffer.from(signatureHeader, 'hex')
+  );
+}
+```
+
+### Signature Verification — Stripe
+
+```javascript
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
+function verifyStripeSignature(rawBody, signatureHeader, endpointSecret) {
+  try {
+    const event = stripe.webhooks.constructEvent(
+      rawBody,           // Must be raw bytes/buffer
+      signatureHeader,   // 'Stripe-Signature' header value
+      endpointSecret     // whsec_... from dashboard
+    );
+    return event;  // Returns constructed event if valid
+  } catch (err) {
+    throw new Error(`Stripe signature verification failed: ${err.message}`);
+  }
+}
+// Note: constructEvent also validates the 5-minute timestamp window automatically
+```
+
+### Worker Processing
+
+The worker consumes from the queue and does the actual normalization:
+
+```
+Worker Process:
+  1. Read webhook_event from queue
+  2. Mark webhook_event.processed = true (optimistic, to prevent double-processing)
+  3. Normalize payload → unified transaction schema
+  4. Resolve user_id (lookup by email/phone, create user record if new)
+  5. UPSERT into transactions ON CONFLICT (provider, provider_transaction_id)
+     DO UPDATE SET status=..., updated_at=NOW()
+     WHERE EXCLUDED.event_occurred_at > transactions.event_occurred_at
+     (Only update if incoming event is newer — prevents out-of-order overwrites)
+  6. Update webhook_event.processed_at = NOW()
+  7. Trigger reconciliation check for this transaction's order_id
+```
+
+### Idempotency Layers
+
+There are three independent idempotency checks:
+
+1. **Webhook level**: `UNIQUE (provider, provider_event_id)` on `webhook_events`. Same event never queued twice.
+2. **Transaction level**: `UNIQUE (provider, provider_transaction_id)` on `transactions`. Upsert with timestamp guard.
+3. **Business level**: Reconciliation marks transactions as matched. Re-running reconciliation on already-matched transactions is a no-op.
+
+---
+
+## 8. Polling Fallback — Implementation Detail
+
+### Gap Filler (Every 15 Minutes)
+
+```javascript
+async function razorpayGapFiller() {
+  const windowEnd = Math.floor(Date.now() / 1000);
+  const windowStart = windowEnd - (30 * 60);  // 30 minutes overlap
+  
+  // Paginate through all results
+  let skip = 0;
+  const count = 100;
+  
+  while (true) {
+    const response = await razorpayClient.payments.all({
+      from: windowStart,
+      to: windowEnd,
+      count,
+      skip,
+    });
+    
+    for (const payment of response.items) {
+      await db.query(`
+        INSERT INTO webhook_events 
+          (provider, provider_event_id, event_type, payload, signature_valid, source, received_at)
+        VALUES 
+          ('razorpay', $1, $2, $3, true, 'polling', NOW())
+        ON CONFLICT (provider, provider_event_id) DO NOTHING
+      `, [payment.id, `payment.${payment.status}`, JSON.stringify(payment)]);
+    }
+    
+    if (response.items.length < count) break;
+    skip += count;
+  }
+}
+```
+
+### Settlement Reconciler (Daily)
+
+```javascript
+async function razorpaySettlementReconciler(date) {
+  // date = yesterday's date
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  
+  const reconData = await razorpayClient.settlements.fetchReconDetails({
+    year, month, day, count: 1000
+  });
+  
+  for (const item of reconData.items) {
+    // Update settlement link and fee data on the transaction
+    await db.query(`
+      UPDATE transactions 
+      SET 
+        settlement_id = $1,
+        fee_amount = $2,
+        tax_amount = $3,
+        net_amount = $4,
+        settlement_date = $5,
+        utr_number = $6,
+        updated_at = NOW()
+      WHERE provider = 'razorpay' 
+        AND provider_transaction_id = $7
+        AND settlement_id IS NULL
+    `, [
+      item.settlement_id,
+      item.fee,
+      item.tax,
+      item.amount - item.fee - item.tax,
+      date,
+      item.settlement_utr,
+      item.entity_id
+    ]);
+  }
+  
+  // Now check if settlement total matches sum of transactions
+  await reconcileSettlementTotal(item.settlement_id);
+}
+```
+
+---
+
+## 9. Settlements as a First-Class Entity
+
+### Why Settlements Matter More Than Individual Transactions
+
+The bank doesn't send you money per transaction. It sends one wire transfer every T+2 days that bundles hundreds of transactions. When a merchant checks their bank statement, they see: "Razorpay: ₹82,450.00 — 14 April 2026". They do not see 400 individual line items.
+
+Reconciliation must therefore work at **two levels**:
+
+**Level 1 — Transaction Reconciliation**: Does every payment/refund event in our system match a record in the merchant's order system? (This is what most of the original document describes.)
+
+**Level 2 — Settlement Reconciliation**: Does the settlement total from the gateway match what actually arrived in the bank? (This is what makes the product actually useful to a CFO.)
+
+### Settlement Reconciliation Flow
+
+```
+1. Razorpay sends settlement.processed webhook (or we detect it via daily poll)
+2. We create a settlements record with gateway's net_amount
+3. We fetch all transactions linked to this settlement_id
+4. Sum their net_amounts → should equal settlement.net_amount
+5. If sum ≠ settlement.net_amount → flag exception type: 'settlement_discrepancy'
+6. Later: merchant uploads bank statement (or we integrate bank API)
+7. We find the UTR number in the bank data → bank_credit_amount
+8. If bank_credit_amount ≠ settlement.net_amount → flag exception
+9. If match → mark settlement as 'matched_to_bank'
+```
+
+### Settlement Timeline Awareness
+
+Do not flag a transaction as an exception just because `fee_amount` is NULL. Fees are only known after settlement. A transaction should be in status `pending_settlement` while waiting. The reconciliation engine should skip fee checks for transactions in this state.
+
+```
+Transaction lifecycle:
+payment.authorized → [fee: NULL, status: authorized, recon: pending]
+payment.captured   → [fee: NULL, status: captured, recon: pending_settlement]
+settlement event   → [fee: populated, status: captured, recon: ready_to_match]
+reconciliation run → [matched or exception]
+```
+
+---
+
+## 10. Reconciliation Engine
+
+The reconciliation engine runs every 5 minutes as a scheduled job, and also gets triggered per-order when a new transaction is ingested.
+
+### Rule Set (MVP)
+
+**Rule 1: Exact Provider ID Match**
+
+For every captured payment from the provider, check if there is a corresponding order in the merchant system with the same `order_id`. If yes and amounts match → `matched`. If amounts differ → `amount_mismatch` exception.
+
+```sql
+-- Find unmatched captured payments older than 5 minutes
+SELECT t.* FROM transactions t
+WHERE t.status = 'captured'
+  AND t.reconciliation_status = 'pending'
+  AND t.event_occurred_at < NOW() - INTERVAL '5 minutes'
+  AND t.order_id IS NOT NULL;
+```
+
+**Rule 2: Refund ↔ Parent Payment Match**
+
+Every refund event must link to an existing captured payment via `parent_transaction_id`. If no parent found → `orphan_refund` exception. If refund amount > original payment amount → `refund_amount_overflow` exception.
+
+```sql
+-- Find refunds with no parent
+SELECT t.* FROM transactions t
+WHERE t.event_type = 'refund'
+  AND t.parent_transaction_id IS NULL
+  AND t.ingested_at < NOW() - INTERVAL '10 minutes';
+```
+
+**Rule 3: Status Drift Detection**
+
+If our database has a transaction as `captured` but the provider API returns it as `failed` (detected by polling fallback) → flag `status_mismatch` exception. This is a serious exception.
+
+**Rule 4: Settlement Total Check**
+
+After a settlement is created, sum the `net_amount` of all transactions linked to that `settlement_id`. Compare to `settlements.net_amount`. If difference > configurable threshold (default: 1 rupee) → `settlement_discrepancy` exception.
+
+**Rule 5: Missing Capture Detection**
+
+If a payment is in `authorized` state for more than 24 hours without being captured → flag `missing_capture` exception. This is a revenue risk: authorized-but-uncaptured payments auto-expire.
+
+```sql
+-- Authorized payments older than 24h
+SELECT * FROM transactions
+WHERE status = 'authorized'
+  AND event_occurred_at < NOW() - INTERVAL '24 hours'
+  AND reconciliation_status = 'pending';
+```
+
+**Rule 6: Duplicate Detection**
+
+If two transactions from the same provider have the same `order_id` and both are `captured` → flag `duplicate_capture` exception. This is common when retries result in double charges.
+
+### Exception Severity Matrix
+
+| Exception Type | Severity | Action |
+|---|---|---|
+| `missing_capture` | High | Alert immediately — revenue risk |
+| `settlement_discrepancy` | Critical | Escalate — actual money difference |
+| `duplicate_capture` | Critical | Block and alert — customer overcharged |
+| `orphan_refund` | High | Review — money went out with no matching payment |
+| `status_mismatch` | High | Investigate — data integrity issue |
+| `amount_mismatch` | Medium | Review — could be discount/coupon difference |
+| `unmatched_payment` | Medium | 48h window before flagging — might be delayed order creation |
+| `fee_discrepancy` | Low | Monitor — usually rounding |
+
+---
+
+## 11. User-Centric Schema for Future Fraud Detection
+
+### Why We Add This Now
+
+Adding `user_id` to the transactions table later means a migration on a table that may have millions of rows, with downtime or complex online migration strategies. The cost of adding it now (a nullable indexed column) is near zero. The cost of adding it later is high.
+
+### Identity Resolution Logic
+
+When a new transaction is ingested, we attempt to find or create a user:
+
+```javascript
+async function resolveUserId(merchantId, payerEmail, payerPhone) {
+  // Try to find existing user by email
+  if (payerEmail) {
+    const existing = await db.query(
+      'SELECT id FROM users WHERE merchant_id = $1 AND email = $2',
+      [merchantId, payerEmail.toLowerCase()]
+    );
+    if (existing.rows.length > 0) return existing.rows[0].id;
+  }
+  
+  // Try by phone
+  if (payerPhone) {
+    const existing = await db.query(
+      'SELECT id FROM users WHERE merchant_id = $1 AND phone = $2',
+      [merchantId, normalizePhone(payerPhone)]
+    );
+    if (existing.rows.length > 0) return existing.rows[0].id;
+  }
+  
+  // Create new user
+  const result = await db.query(`
+    INSERT INTO users (merchant_id, email, phone, name, first_seen_at, last_seen_at)
+    VALUES ($1, $2, $3, $4, NOW(), NOW())
+    ON CONFLICT DO NOTHING
+    RETURNING id
+  `, [merchantId, payerEmail, payerPhone, payerName]);
+  
+  return result.rows[0]?.id || null;
+}
+```
+
+### UPI Identity Challenge
+
+UPI transactions from Razorpay often provide only a **VPA** (Virtual Payment Address) like `user@okicici`, with no name or phone number. Store the VPA in the `vpa` column on transactions. When building fraud detection, VPA-to-user mapping becomes its own entity. For now, store it and don't try to resolve it to a user — the VPA may be shared across accounts or may change per transaction.
+
+### Fraud-Ready Aggregates
+
+The `users` table maintains running totals updated via a trigger or application-level update on every transaction insert:
+
+```sql
+-- Update user aggregates on new transaction
+UPDATE users SET
+  total_txn_count = total_txn_count + 1,
+  total_txn_amount = total_txn_amount + $amount,
+  failed_txn_count = failed_txn_count + CASE WHEN $status = 'failed' THEN 1 ELSE 0 END,
+  last_seen_at = NOW(),
+  updated_at = NOW()
+WHERE id = $user_id;
+```
+
+When you are ready to build fraud detection (Phase 2+), these aggregates are already computed. You add a `payment_methods` table and a `user_device_fingerprints` table, and you build velocity rules on top of the existing data.
+
+---
+
+## 12. API Design
+
+### Endpoints (MVP)
+
+```
+# Webhooks (incoming from providers)
+POST  /webhooks/razorpay         — Razorpay webhook receiver
+POST  /webhooks/stripe           — Stripe webhook receiver
+
+# Exceptions
+GET   /api/v1/exceptions         — List exceptions (filters: days, provider, type, status)
+GET   /api/v1/exceptions/:id     — Exception detail
+PATCH /api/v1/exceptions/:id     — Resolve / ignore with notes
+
+# Transactions
+GET   /api/v1/transactions              — List (filters: provider, status, date range, order_id)
+GET   /api/v1/transactions/:id          — Single transaction detail with all linked events
+GET   /api/v1/transactions/:id/events   — All events for this transaction ID
+
+# Settlements
+GET   /api/v1/settlements               — List settlements
+GET   /api/v1/settlements/:id           — Settlement detail with linked transactions
+GET   /api/v1/settlements/:id/transactions — All txns in a settlement
+
+# Dashboard
+GET   /api/v1/dashboard/summary         — Counts: total txns, matched, exceptions by type
+GET   /api/v1/dashboard/metrics         — Webhook delivery rate, match rate, queue depth
+
+# Admin
+POST  /api/v1/admin/replay              — Replay failed webhook events from DLQ
+POST  /api/v1/admin/poll                — Manually trigger polling job for a date range
+GET   /api/v1/admin/audit-logs          — Audit trail
+```
+
+### Query Patterns for Exception Listing
+
+```
+GET /api/v1/exceptions?days=7&provider=razorpay&type=amount_mismatch&status=open&page=1&limit=50
+
+Response:
+{
+  "summary": {
+    "total": 23,
+    "by_type": { "amount_mismatch": 10, "orphan_refund": 8, "missing_capture": 5 },
+    "by_severity": { "critical": 2, "high": 8, "medium": 13 }
+  },
+  "exceptions": [
+    {
+      "id": 1042,
+      "type": "amount_mismatch",
+      "severity": "medium",
+      "provider": "razorpay",
+      "transaction_id": "pay_OKxyz123",
+      "order_id": "ORD-9821",
+      "expected_amount": 50000,
+      "actual_amount": 48500,
+      "discrepancy_amount": 1500,
+      "currency": "INR",
+      "description": "Payment amount ₹485.00 does not match expected order amount ₹500.00",
+      "status": "open",
+      "detected_at": "2026-04-14T08:23:11Z"
+    }
+  ],
+  "pagination": { "page": 1, "limit": 50, "total_pages": 1 }
+}
+```
+
+---
+
+## 13. Frontend / Dashboard
+
+### Views Required for MVP
+
+**View 1: Summary Dashboard**
+
+- Header: Total transactions | Matched | Open exceptions | Match rate %
+- Tabs: Last 1 day / 7 days / 30 days
+- Breakdown by provider (Razorpay vs Stripe)
+- Exception count by type (bar chart)
+- Settlement status summary (pending / matched / discrepant)
+
+**View 2: Exception List**
+
+- Searchable, filterable table
+- Filters: Provider, Exception Type, Severity, Status (open/resolved), Date Range
+- Columns: Detected At | Provider | Type | Severity | Order ID | Transaction ID | Discrepancy Amount | Status
+- Row click → Exception Detail
+
+**View 3: Exception Detail**
+
+- Full exception information
+- Linked transaction data (both sides if applicable)
+- Raw provider payload (expandable/collapsible)
+- Resolution panel: Status dropdown + Notes text area + Submit
+- Audit trail: who changed what and when
+
+**View 4: Transaction Lookup**
+
+- Search by Transaction ID, Order ID, email
+- Shows full event history for a transaction
+- Shows linked settlement
+- Shows reconciliation status and matched records
+
+**View 5: Settlement View**
+
+- List of settlements with status
+- Settlement detail: expected vs bank credit
+- Linked transaction count and list
+
+---
+
+## 14. Tech Stack Recommendation
+
+### Why This Stack
+
+We recommend a stack that prioritizes: operational simplicity for a small team, strong financial data integrity (ACID compliance), and fast time-to-production.
+
+| Layer | Choice | Reason |
+|---|---|---|
+| **Backend API** | Node.js + TypeScript + Express | Fast iteration, strong Stripe/Razorpay SDK support, team familiarity |
+| **Database** | PostgreSQL 16 | ACID transactions, JSONB for payloads, excellent index support, industry standard for fintech |
+| **Queue** | BullMQ + Redis | Simple to operate, excellent for webhook processing, built-in DLQ, retry logic, job monitoring UI (Bull Board) |
+| **ORM / Query** | Prisma or raw `pg` | Prisma for migrations and type safety; raw pg for performance-critical reconciliation queries |
+| **Frontend** | React + TypeScript + TanStack Query | Solid data fetching, good for filter-heavy tables |
+| **UI Components** | shadcn/ui or Ant Design | Table-heavy finance UI benefits from pre-built data grid components |
+| **Monitoring** | Datadog or Grafana + Prometheus | Webhook delivery rate, queue depth, match rate metrics |
+| **Hosting** | Railway or Render (MVP) → AWS (scale) | Low ops overhead for MVP; migrate to ECS/RDS when volumes demand it |
+| **Secrets** | AWS Secrets Manager or Doppler | Never put webhook secrets in env files |
+
+### Infrastructure for MVP (Keep It Simple)
+
+```
+1 x App Server (Node.js API + Webhook Handler)
+1 x Worker Server (Queue Consumer + Reconciliation Jobs)
+1 x PostgreSQL (managed, e.g. Railway Postgres or Supabase)
+1 x Redis (managed, e.g. Upstash or Railway Redis)
+```
+
+This is enough to handle hundreds of thousands of transactions per month. Scale the worker horizontally when needed — it's stateless.
+
+### Do NOT Over-Engineer for MVP
+
+The original document mentioned Kafka. **Do not use Kafka for MVP.** Kafka requires operational expertise and is built for millions of events per second. BullMQ on Redis handles tens of thousands of jobs per minute and is operationally trivial. Switch to Kafka only when you have >10M events/day and a dedicated DevOps engineer.
+
+---
+
+## 15. Security Checklist
+
+### Webhook Security
+
+- [ ] Use raw body for signature verification (never re-serialize parsed JSON)
+- [ ] Use `crypto.timingSafeEqual` for signature comparison (prevents timing attacks)
+- [ ] Validate Stripe's 5-minute timestamp window
+- [ ] Whitelist Razorpay's published IP ranges at load balancer/firewall level
+- [ ] Use separate webhook secrets per environment (test vs live)
+- [ ] Rotate webhook secrets every 90 days (Stripe supports zero-downtime rotation with dual secrets)
+- [ ] Log all signature failures with source IP (potential attack indicator)
+
+### API Security
+
+- [ ] All endpoints require authentication (JWT or API key)
+- [ ] Scope access by `merchant_id` — a merchant must never see another merchant's data
+- [ ] Rate limit webhook endpoints (max 1000 req/min per IP)
+- [ ] Enable HTTPS only — no HTTP
+- [ ] CORS restricted to your frontend domain only
+
+### Data Security
+
+- [ ] Do not log full card numbers or CVVs (they shouldn't be in payloads, but add a payload scrubber)
+- [ ] Encrypt PII at rest (email, phone) using column-level encryption or AES-256 encryption before storage
+- [ ] `raw_payload` column: prune sensitive fields before storing (Razorpay and Stripe mask card numbers in webhooks, but validate this)
+- [ ] Database: no public access, VPC-only, credentials in secrets manager
+- [ ] Enable PostgreSQL row-level security if you go multi-tenant
+- [ ] Regular backups with point-in-time recovery
+
+### Compliance Considerations
+
+- You are handling payment data but NOT card numbers (those stay with the gateways). However, PII (email, phone) is present.
+- India: Review RBI's data localization guidelines — payment data about Indian customers may need to be stored in India.
+- PCI-DSS: You are not a payment processor, but review scope with a legal advisor.
+
+---
+
+## 16. Operational Features
+
+### Monitoring Metrics to Track
+
+| Metric | Alert Threshold |
 |---|---|
-| `provider` | `"razorpay"` or `"stripe"` |
-| `providerEventId` | The event ID from the provider's payload |
-| `eventType` | e.g. `payment.captured`, `charge.refunded` |
-| `payload` | Full raw JSON stored as a JSON column |
-| `processed` | `false` initially, set to `true` after processing |
-| `processingError` | Populated if processing threw an exception |
-| `source` | `webhook`, `polling`, or `admin-poll` |
-| `signatureValid` | Always `true` — set at ingestion (signature verified at controller) |
-
----
-
-## 7. Transaction Processing Flow
-
-`TransactionProcessingService.processAsync()` runs in the `webhookProcessingExecutor` thread pool (core=5, max=20, queue=500). It is annotated with `@Async` and `@Transactional`.
-
-```
-processAsync(webhookEventId, provider)
-        │
-   load WebhookEvent by ID
-        │
-   route(payload, provider, eventType)
-        │
-   NormalizationService  ──►  canonical Transaction object
-        │                      (or null if event type is not handled)
-        │
-   if null → markProcessed, return
-        │
-   if payer email/phone present:
-        └──► UserIdentityService.resolveUserId(merchantId, email, phone, name)
-                    │ (find-or-create user record)
-                    └──► transaction.setUserId(userId)
-        │
-   if eventType == REFUND:
-        └──► TransactionService.linkRefundToParent(transaction, payload, provider)
-                    │ (looks up parent payment by provider payment ID)
-                    └──► transaction.setParentTransactionId(parentId)
-        │
-   TransactionService.upsert(transaction)
-        │ (insert or merge based on eventOccurredAt)
-        │
-   UserIdentityService.incrementAggregates(userId, amount, isFailed)
-        │ (atomic update of user's txn count, total amount, fail count)
-        │
-   WebhookEvent.processed = true, processedAt = now
-        │
-   save WebhookEvent
-```
-
-**Error handling:** If any step throws, the exception is caught, `processingError` is set on the webhook event, and `processed` is set to `true`. This prevents the event from being re-queued automatically. An admin can replay it once the root cause is fixed.
-
-### Event routing table
-
-| Provider | Event type | Normalization method |
-|---|---|---|
-| razorpay | `payment.authorized` | `normalizeRazorpayPaymentAuthorized` |
-| razorpay | `payment.captured` | `normalizeRazorpayPaymentCaptured` |
-| razorpay | `payment.failed` | `normalizeRazorpayPaymentFailed` |
-| razorpay | `refund.processed` | `normalizeRazorpayRefundProcessed` |
-| razorpay | `settlement.processed` | returns `null` (handled by SettlementService) |
-| razorpay | `dispute.created` | `normalizeRazorpayDisputeCreated` |
-| stripe | `payment_intent.succeeded` | `normalizeStripePaymentSucceeded` |
-| stripe | `payment_intent.payment_failed` | `normalizeStripePaymentFailed` |
-| stripe | `charge.refunded` | `normalizeStripeChargeRefunded` |
-| stripe | `charge.dispute.created` | `normalizeStripeDisputeCreated` |
-| stripe | `payout.paid` | returns `null` (handled by SettlementService) |
-
----
-
-## 8. Normalization — Provider to Canonical Format
-
-`NormalizationService` converts provider-specific JSON payloads into a uniform `Transaction` entity. This isolates all provider-specific parsing in one place.
-
-### Razorpay payload structure
-
-Razorpay wraps data in a nested `payload.<entity_type>.entity` path:
-
-```json
-{
-  "id": "evt_XYZ",
-  "event": "payment.captured",
-  "payload": {
-    "payment": {
-      "entity": {
-        "id": "pay_ABC",
-        "amount": 50000,
-        "currency": "INR",
-        "fee": 1000,
-        "tax": 180,
-        "order_id": "order_123",
-        "email": "user@example.com",
-        "contact": "+919876543210",
-        "method": "card",
-        "card": { "last4": "1234", "network": "Visa" }
-      }
-    }
-  }
-}
-```
-
-### Stripe payload structure
-
-Stripe uses a flat `data.object` path:
-
-```json
-{
-  "id": "evt_XYZ",
-  "type": "payment_intent.succeeded",
-  "created": 1700000000,
-  "data": {
-    "object": {
-      "id": "pi_ABC",
-      "amount": 5000,
-      "currency": "usd",
-      "receipt_email": "user@example.com"
-    }
-  }
-}
-```
-
-### Canonical Transaction fields set during normalization
-
-| Field | Source | Notes |
-|---|---|---|
-| `provider` | hardcoded per method | `"razorpay"` or `"stripe"` |
-| `providerTransactionId` | payment/charge/refund `id` | unique per provider |
-| `merchantId` | passed in from config | `merchant_001` by default |
-| `eventType` | mapped from event name | `PAYMENT`, `REFUND`, `CHARGEBACK` |
-| `status` | mapped from event name | `AUTHORIZED`, `CAPTURED`, `FAILED`, `REFUNDED`, `DISPUTED` |
-| `presentmentAmount` | amount field (paisa or cents) | raw integer, smallest currency unit |
-| `presentmentCurrency` | currency field | uppercased, e.g. `"INR"`, `"USD"` |
-| `feeAmount` | fee field | Razorpay provides at capture; Stripe does not in webhook |
-| `netAmount` | `amount - fee - tax` | Razorpay only at capture |
-| `payerEmail` | email / receipt_email | lowercased and trimmed by UserIdentityService |
-| `payerPhone` | contact field | normalized to +91 format |
-| `paymentMethod` | method / payment_method_details | `"card"`, `"upi"`, `"netbanking"` |
-| `reconciliationStatus` | set at normalization | see table below |
-| `eventOccurredAt` | `created_at` (unix epoch) | converted to OffsetDateTime UTC |
-
-### Initial reconciliation status by event type
-
-| Event | Initial reconciliation status | Reason |
-|---|---|---|
-| `payment.authorized` | `PENDING` | Not yet captured; wait |
-| `payment.captured` | `PENDING_SETTLEMENT` | Captured; waiting for settlement grouping |
-| `payment.failed` | `MATCHED` | Failed = no money moved; no reconciliation needed |
-| `refund.processed` | `PENDING` | Link to parent and verify |
-| `dispute.created` | `EXCEPTION` | Dispute always needs attention |
-
----
-
-## 9. User Identity Resolution
-
-`UserIdentityService.resolveUserId()` finds or creates a `User` record for the payer behind a transaction. This enables per-user analytics (total spend, failed count) and allows ops to see all transactions for a single customer.
-
-### Resolution logic
-
-```
-1. If email is present → find User by (merchantId, email)
-       found → update lastSeenAt, return userId
-2. If email not found but phone is present → find User by (merchantId, phone)
-       found → backfill email if newly available, update lastSeenAt, return userId
-3. Neither found → create new User record
-       on DataIntegrityViolationException (race condition) → re-query by email
-4. If neither email nor phone → return null (UPI-only transactions have no stable identity)
-```
-
-The method uses `SERIALIZABLE` isolation to prevent duplicate user creation under concurrent ingestion of the same user's transactions.
-
-After a transaction is upserted, `incrementAggregates()` atomically updates:
-- `total_txn_count`
-- `total_txn_amount`
-- `failed_txn_count`
-
-### Phone normalization
-
-- Strips spaces, dashes, dots
-- 10-digit numbers prefixed with `+91`
-- Numbers starting with `0` converted to `+91`
-
----
-
-## 10. Transaction Upsert Logic
-
-`TransactionService.upsert()` handles both new transactions and updates to existing ones. The key design principle is **event-time ordering**: a newer event always wins over an older one for the same transaction.
-
-```
-find existing by (provider, providerTransactionId)
-        │
-        ├── not found → INSERT and return
-        │
-        └── found:
-                compare incoming.eventOccurredAt vs current.eventOccurredAt
-                        │
-                        ├── incoming is older or equal → SKIP, return current
-                        │
-                        └── incoming is newer → MERGE mutable fields
-                                │
-                                ├── status, eventType, providerEventId
-                                ├── orderId, providerOrderId (first non-blank wins)
-                                ├── feeAmount, netAmount, taxAmount, settlementAmount
-                                ├── settlementId, settlementDate, utrNumber
-                                ├── paymentMethod, cardLast4, cardNetwork, bank, vpa
-                                ├── payerEmail, payerPhone, payerName
-                                ├── userId (if incoming is non-null)
-                                ├── capturedAt, refundedAt
-                                └── notes (merged map — incoming keys overwrite)
-```
-
-**Why `firstNonBlank` for string fields?** Once an orderId is set, it should not be cleared by a later event that lacks it. Provider APIs sometimes omit fields in later events that were present in earlier ones.
-
-**Refund linking:** When a `REFUND` event is processed, `TransactionService.linkRefundToParent()` extracts the original payment ID from the payload and looks up the parent `Transaction`. If found, `parentTransactionId` is set on the refund record, creating the payment-refund relationship.
-
----
-
-## 11. Reconciliation Engine
-
-`ReconciliationEngine.runAll()` executes all reconciliation rules in sequence. Rules are Spring beans implementing the `ReconciliationRule` interface, so new rules are picked up automatically by Spring's dependency injection without any registration step.
-
-```java
-public interface ReconciliationRule {
-    String getName();
-    void evaluate();
-}
-```
-
-### Execution model
-
-- **ReconciliationJob** triggers `runAll()` every 5 minutes via db-scheduler
-- db-scheduler runs in a distributed-safe manner — only one instance runs the job at a time even in a multi-node deployment
-- If one rule throws an exception, that exception is logged and the engine continues to the next rule — one broken rule never blocks the others
-- Execution time is recorded as a Micrometer timer: `reconciliation.run.duration`
-- Total exceptions created is tracked as a counter: `reconciliation.exceptions.created`
-
----
-
-## 12. Reconciliation Rules Deep Dive
-
-### ExactIdMatchRule
-
-**Purpose:** Close out `CAPTURED` payments that have been waiting for settlement.
-
-**Candidates:** Transactions with `status=CAPTURED` AND `reconciliationStatus=PENDING_SETTLEMENT` AND `eventOccurredAt < now - 5 minutes`.
-
-**Logic:**
-- If the transaction has a non-blank `orderId` → mark `reconciliationStatus=MATCHED`
-- If `orderId` is missing → create `UNMATCHED_PAYMENT` exception (MEDIUM severity), mark `reconciliationStatus=EXCEPTION`
-
-**Why 5-minute delay?** A payment captured right now may still be receiving supplemental data (like order ID) from a second event arriving within seconds.
-
----
-
-### MissingCaptureRule
-
-**Purpose:** Flag payments stuck in `AUTHORIZED` for too long, indicating a likely auto-expiry or missed capture.
-
-**Candidates:** Transactions with `status=AUTHORIZED` AND `eventOccurredAt < now - 24 hours` (configurable via `app.reconciliation.missing-capture-threshold-hours`).
-
-**On match:** Creates `MISSING_CAPTURE` exception (HIGH severity).
-
----
-
-### OrphanRefundRule
-
-**Purpose:** Flag refunds that could not be linked to a parent payment.
-
-**Candidates:** Transactions with `eventType=REFUND` AND `parentTransactionId IS NULL` AND `eventOccurredAt < now - 10 minutes`.
-
-**On match:** Creates `ORPHAN_REFUND` exception (HIGH severity).
-
-**Why 10-minute grace?** The parent payment and the refund may arrive very close together. The 10-minute window allows the parent to be saved before the rule runs.
-
----
-
-### DuplicateCaptureRule
-
-**Purpose:** Detect the same order being charged more than once.
-
-**Candidates:** `(merchantId, orderId)` groups where more than one `CAPTURED` payment exists for the same order.
-
-**Logic:** Query groups that have `COUNT > 1`, then flag every transaction in that group with a `DUPLICATE_CAPTURE` exception (CRITICAL severity).
-
----
-
-### SettlementTotalRule
-
-**Purpose:** Verify that the sum of net amounts for all transactions in a settlement matches the settlement's declared `netAmount`.
-
-**Candidates:** Settlements with `settlementStatus=SETTLED`.
-
-**Logic:**
-```
-transactionSum = SUM(netAmount) WHERE settlementId = settlement.providerSettlementId
-diff = ABS(settlement.netAmount - transactionSum)
-
-if diff > tolerance (default 100 paisa):
-    create SETTLEMENT_DISCREPANCY exception (CRITICAL)
-    mark settlement.settlementStatus = DISCREPANT
-else:
-    log success (settlement is correct)
-```
-
-The tolerance (default 100 paisa = ₹1) is configurable via `app.reconciliation.amount-tolerance-paisa`.
-
----
-
-### ExceptionRecord deduplication
-
-`ExceptionRecordService.createForTransaction()` checks whether an OPEN or IN_REVIEW exception of the same `(type, transactionId)` already exists before creating a new one. This prevents the engine from creating duplicate exceptions on every 5-minute run.
-
----
-
-## 13. Exception Management
-
-An `ExceptionRecord` represents an anomaly detected by the reconciliation engine.
-
-### Exception types
-
-| Type | Created by | Severity |
-|---|---|---|
-| `UNMATCHED_PAYMENT` | ExactIdMatchRule | MEDIUM |
-| `MISSING_CAPTURE` | MissingCaptureRule | HIGH |
-| `ORPHAN_REFUND` | OrphanRefundRule | HIGH |
-| `DUPLICATE_CAPTURE` | DuplicateCaptureRule | CRITICAL |
-| `SETTLEMENT_DISCREPANCY` | SettlementTotalRule, SettlementReconcilerJob | CRITICAL / HIGH |
-
-### Exception lifecycle
-
-```
-OPEN  ──►  IN_REVIEW  ──►  RESOLVED
-  │                            ▲
-  └────────────────────────────┘
-  │
-  └──► IGNORED
-```
-
-- `OPEN`: Created by a reconciliation rule. Needs attention.
-- `IN_REVIEW`: An ops team member has started investigating.
-- `RESOLVED`: The underlying issue has been fixed.
-- `IGNORED`: Acknowledged as non-actionable (e.g., test transaction).
-
-When status transitions to `RESOLVED` or `IGNORED`, `resolvedAt` and `resolvedBy` are stamped on the record.
-
-### Exception API (`/api/v1/exceptions`)
-
-All requests route through `ExceptionController` → `ExceptionQueryService`.
-
-**GET `/api/v1/exceptions`** — List exceptions with filters:
-- `days` (default 7) — look-back window
-- `status` — filter by `OPEN`, `IN_REVIEW`, `RESOLVED`, `IGNORED`
-- `provider` — filter by provider (resolved via linked transaction)
-- `type` — filter by exception type
-- `page`, `limit` — pagination
-
-Response includes a `summary` block with counts by status.
-
-**GET `/api/v1/exceptions/{id}`** — Get a single exception with its linked transaction and full audit trail.
-
-**PATCH `/api/v1/exceptions/{id}`** — Update status and add resolution notes. Requires `X-Actor` header. Every update is recorded in the audit log.
-
-```json
-PATCH /api/v1/exceptions/42
-X-Actor: ops-engineer-1
-{
-  "status": "RESOLVED",
-  "notes": "Verified with Razorpay dashboard — legitimate duplicate, refund already issued"
-}
-```
-
----
-
-## 14. Settlement Reconciliation
-
-Settlements represent the bank transfer from Razorpay or Stripe to the merchant. Each settlement groups multiple transactions.
-
-### Settlement entity key fields
-
-| Field | Description |
-|---|---|
-| `providerSettlementId` | Provider's unique ID for this settlement |
-| `grossAmount` | Total gross amount |
-| `totalFees` | Total platform fees |
-| `netAmount` | Gross minus fees |
-| `bankCreditAmount` | Amount actually credited to bank |
-| `bankCreditDate` | Date of bank credit |
-| `utrNumber` | UTR reference for bank transfer |
-| `settlementStatus` | `PENDING` → `SETTLED` → `MATCHED_TO_BANK` or `DISCREPANT` |
-
-### Settlement status flow
-
-```
-PENDING  ──►  SETTLED  ──►  MATCHED_TO_BANK  (SettlementReconcilerJob closes cleanly)
-                  │
-                  └──►  DISCREPANT           (SettlementTotalRule: amount mismatch)
-```
-
-### SettlementReconcilerJob (daily at 2 AM)
-
-This job runs independently of the main ReconciliationEngine and handles two responsibilities:
-
-**Phase 1 — Close clean settlements:**
-- Find all settlements with `status = SETTLED`
-- For each, check if any `OPEN` or `IN_REVIEW` exceptions reference it
-- If no open exceptions → update to `MATCHED_TO_BANK`
-- If open exceptions exist → leave as `SETTLED`, log warning
-
-**Phase 2 — Flag overdue pending settlements:**
-- Find settlements with `status = PENDING` AND `createdAt < now - 7 days` (configurable)
-- For each not already flagged, create a `SETTLEMENT_DISCREPANCY` exception (HIGH severity) describing how many days it has been pending
-- Prevents long-pending settlements from going unnoticed
-
-The job can also be triggered manually via `POST /api/v1/admin/settlement-reconciler/run`.
-
----
-
-## 15. Gap Filler — Polling for Missed Events
-
-Webhooks can be missed due to network issues, provider outages, or misconfigured endpoints. The Gap Filler job compensates by periodically polling the provider APIs for recent events.
-
-### GapFillerJob (every 15 minutes)
-
-```
-Compute window:
-    from = now - 30 minutes  (configurable: app.polling.gap-filler-lookback-minutes)
-    to   = now
-
-Razorpay:
-    fetchPayments(from, to)  ──► paginated Razorpay API call (page size 100)
-    fetchRefunds(from, to)   ──► paginated Razorpay API call
-    each result wrapped in synthetic webhook envelope → ingestAsync(payload, "razorpay", "polling")
-
-Stripe:
-    fetchCharges(from, to)   ──► cursor-paginated Stripe API call (limit 100)
-    fetchRefunds(from, to)   ──► cursor-paginated Stripe API call
-    each result wrapped in synthetic webhook envelope → ingestAsync(payload, "stripe", "polling")
-```
-
-### Synthetic envelope format
-
-The polling services wrap raw API responses in a structure that matches the webhook payload format, so `WebhookIngestionService` and `NormalizationService` work identically for both sources.
-
-**Razorpay example:**
-```json
-{
-  "id": "poll_payments_0_0",
-  "event": "payment.captured",
-  "payload": {
-    "payment": {
-      "entity": { ...razorpay payment object... }
-    }
-  }
-}
-```
-
-**Stripe example:**
-```json
-{
-  "id": "poll_ch_ABC",
-  "type": "charge.succeeded",
-  "created": 1700000000,
-  "data": {
-    "object": { ...stripe charge object... }
-  }
-}
-```
-
-Deduplication in `WebhookIngestionService` (unique constraint on `provider + providerEventId`) ensures that events already received via webhook are silently ignored when they appear again via polling.
-
-Metrics: `polling.gaps.filled` counter tracks how many events were picked up by polling.
-
----
-
-## 16. Admin Operations
-
-All admin endpoints are under `/api/v1/admin` and require a valid JWT. They accept an `X-Actor` header to identify who triggered the action (used in audit logs).
-
-### Replay a webhook event
-
-```
-POST /api/v1/admin/replay
-X-Actor: ops-engineer
-{ "webhookEventId": 1234 }
-```
-
-Use case: A webhook event failed processing (e.g., NormalizationService bug). After deploying a fix, replay resets the event's `processed` flag and re-queues async processing.
-
-**What happens:**
-1. Load `WebhookEvent` by ID
-2. Reset `processed=false`, `processedAt=null`, `processingError=null`
-3. Call `TransactionProcessingService.processAsync(eventId, provider)` (async)
-4. Log audit entry: `action=webhook_replayed`
-5. Return `{"status": "queued", ...}`
-
-### Admin-triggered polling
+| Webhook delivery failure rate | > 5% over 5 minutes |
+| Queue depth (unprocessed jobs) | > 500 for > 2 minutes |
+| Reconciliation job duration | > 10 minutes |
+| Daily exception rate | > 20% of transaction volume |
+| Settlement discrepancy amount | Any amount > ₹100 |
+| Polling fallback gaps filled | > 50 gaps/hour (signals webhook reliability issue) |
+| Stripe/Razorpay API error rate | > 2% on polling calls |
+
+### Replay and Recovery
+
+**Scenario 1: Our webhook endpoint was down for 2 hours**
+
+Recovery: Razorpay will auto-retry for 24h. Stripe for 3 days. For anything that fell through: run the gap filler polling job manually for the affected time window.
 
 ```
 POST /api/v1/admin/poll
-X-Actor: ops-engineer
 {
   "provider": "razorpay",
-  "from": "2024-01-15T00:00:00Z",
-  "to": "2024-01-15T23:59:59Z"
+  "from": "2026-04-14T10:00:00Z",
+  "to": "2026-04-14T12:00:00Z"
 }
 ```
 
-Use case: A specific time window had a webhook outage. Trigger a targeted backfill for that window without waiting for the scheduled gap-filler.
+**Scenario 2: A worker bug processed events incorrectly**
 
-**What happens:**
-1. Call `RazorpayPollingService.fetchPayments(from, to)` + `fetchRefunds(from, to)`  
-   (or Stripe equivalents for `"stripe"`)
-2. For each fetched payload, call `WebhookIngestionService.ingestAsync(payload, provider, "admin-poll")`
-3. Log audit entry: `action=admin_poll_triggered` with `fetched` count
-4. Return `{"status": "accepted", "provider": "...", "fetched": N, ...}`
+Recovery: Raw events are stored in `webhook_events`. Mark them as `processed = false` and requeue. The upsert logic ensures correct data wins.
 
-### Manual settlement reconciliation
+**Scenario 3: Razorpay lets you replay specific events via dashboard**
 
-```
-POST /api/v1/admin/settlement-reconciler/run
-X-Actor: ops-engineer
-```
+Razorpay allows replaying any event up to 15 days old from their dashboard. For Stripe, use `stripe events resend {event_id}` via CLI.
 
-Triggers `SettlementReconcilerJob.run()` on demand. Returns a summary of what was processed.
+### Dead Letter Queue
 
-### Audit log search
-
-```
-GET /api/v1/admin/audit-logs?entityType=webhook_event&entityId=1234
-GET /api/v1/admin/audit-logs?actor=ops-engineer
-```
+Any webhook that fails processing more than 5 times goes to the DLQ. The admin UI shows DLQ contents. An engineer can inspect, fix the bug, and requeue.
 
 ---
 
-## 17. Dashboard and Metrics
+## 17. MVP Roadmap — Phased Plan
 
-### Summary endpoint
+### Phase 1: Foundation (Weeks 1–3)
 
-```
-GET /api/v1/dashboard/summary?days=7
-```
+**Goal**: Working webhook ingestion with raw storage and basic normalization.
 
-Returns a comprehensive summary for the given look-back window:
-
-| Key | Description |
-|---|---|
-| `totalTransactions` | Count of all transactions in the window |
-| `matched` | Count with `reconciliationStatus=MATCHED` |
-| `openExceptions` | Count of OPEN exception records |
-| `matchRate` | `matched / total * 100` (percentage) |
-| `byProvider` | Per-provider breakdown: total count + exception count |
-| `byExceptionType` | Exception count grouped by type |
-| `recentExceptions` | 5 most recent exceptions (id, type, severity, status) |
-
-### Metrics endpoint
-
-```
-GET /api/v1/dashboard/metrics
-```
-
-Returns:
-
-| Key | Description |
-|---|---|
-| `transactionsProcessed` | All-time transaction count |
-| `openExceptions` | Open + in-review exception count |
-| `matchRate` | All-time match rate |
-| `webhookQueueDepth` | Currently 0 (placeholder for future queue depth metric) |
-| `status` | Always `"ok"` |
-
-### Prometheus metrics (Micrometer)
-
-Available at `GET /actuator/prometheus`:
-
-| Metric | Type | Description |
+| Task | Priority | Effort |
 |---|---|---|
-| `reconciliation.exceptions.created` | Counter | Total exceptions created by the engine |
-| `reconciliation.run.duration` | Timer | Time taken for a full engine run |
-| `polling.gaps.filled` | Counter | Events fetched by gap-filler polling |
+| Set up PostgreSQL schema (all tables above) | P0 | 2 days |
+| Razorpay webhook handler with signature verification | P0 | 1 day |
+| Stripe webhook handler with signature verification | P0 | 1 day |
+| BullMQ queue setup with worker pool | P0 | 1 day |
+| Normalization layer (provider → unified schema) | P0 | 3 days |
+| Idempotency (unique constraints + upsert logic) | P0 | 1 day |
+| Polling gap filler (Razorpay + Stripe) | P0 | 2 days |
+| Basic health check API | P0 | 0.5 days |
+
+**Exit Criteria**: Webhook events from both providers land in DB with no duplicates. Polling fills gaps. Raw payloads preserved.
 
 ---
 
-## 18. Audit Logging
+### Phase 2: Reconciliation Core (Weeks 4–5)
 
-`AuditService.log()` creates an immutable `AuditLog` record for every sensitive operation.
+**Goal**: Working exception detection for the most important cases.
 
-### What gets audited
+| Task | Priority | Effort |
+|---|---|---|
+| Reconciliation engine — Rule 1: ID match | P0 | 2 days |
+| Reconciliation engine — Rule 2: Orphan refunds | P0 | 1 day |
+| Reconciliation engine — Rule 5: Missing captures | P0 | 1 day |
+| Reconciliation engine — Rule 6: Duplicate detection | P0 | 1 day |
+| Settlement entity creation from webhooks + polling | P0 | 2 days |
+| Daily settlement reconciler job | P0 | 2 days |
+| Exceptions table population | P0 | 1 day |
 
-| Action | Triggered by |
-|---|---|
-| `webhook_replayed` | AdminService.replay() |
-| `admin_poll_triggered` | AdminService.poll() |
-| `settlement_reconciler_run` | SettlementReconcilerJob.run() |
-| `exception_status_updated` | ExceptionQueryService.update() |
-| `RESOLVE_EXCEPTION` | ExceptionController (legacy path) |
-
-### AuditLog fields
-
-| Field | Description |
-|---|---|
-| `actor` | Who performed the action (from `X-Actor` header or `"scheduler"`) |
-| `action` | Name of the action |
-| `entityType` | Type of entity affected (`webhook_event`, `exception_record`, etc.) |
-| `entityId` | Primary key of the affected entity |
-| `oldValue` | State before the change (JSON) |
-| `newValue` | State after the change (JSON) |
-| `ipAddress` | Client IP (stored as PostgreSQL `inet` type) |
-| `createdAt` | Timestamp of the audit entry |
+**Exit Criteria**: Exceptions are being created for real mismatches. Settlement totals are being checked daily.
 
 ---
 
-## 19. Scheduled Jobs Summary
+### Phase 3: Dashboard MVP (Weeks 6–7)
 
-All jobs use [db-scheduler](https://github.com/kagkarlsson/db-scheduler), a persistent distributed scheduler backed by a PostgreSQL table (`scheduled_tasks`). This ensures that in a multi-instance deployment, each job runs exactly once.
+**Goal**: Usable UI for finance team.
 
-| Job | Schedule | Purpose |
+| Task | Priority | Effort |
 |---|---|---|
-| `ReconciliationJob` | Every 5 minutes | Runs all 5 reconciliation rules |
-| `GapFillerJob` | Every 15 minutes | Polls Razorpay + Stripe for missed events |
-| `SettlementReconcilerJob` | Daily at 2 AM | Closes settled settlements; flags overdue pending ones |
+| REST API for exceptions (list, filter, detail) | P0 | 2 days |
+| REST API for dashboard summary stats | P0 | 1 day |
+| Exception list UI with filters | P0 | 2 days |
+| Exception detail + manual resolution UI | P0 | 2 days |
+| Transaction lookup UI | P1 | 1 day |
+| Audit log API + UI | P1 | 1 day |
+
+**Exit Criteria**: Finance team can log in, see exceptions, and resolve them with notes.
 
 ---
 
-## 20. Data Model
+### Phase 4: Hardening (Week 8)
 
-### Table: `webhook_events`
+**Goal**: Production-ready reliability and security.
 
-| Column | Type | Notes |
+| Task | Priority | Effort |
 |---|---|---|
-| `id` | bigint PK | Auto-generated |
-| `provider` | varchar(30) | `razorpay` or `stripe` |
-| `provider_event_id` | varchar(120) | UNIQUE with provider |
-| `event_type` | varchar(80) | e.g. `payment.captured` |
-| `payload` | jsonb | Full raw payload |
-| `processed` | boolean | Processing complete |
-| `received_at` | timestamptz | When we received the event |
-| `processed_at` | timestamptz | When processing completed |
-| `processing_error` | text | Error message if processing failed |
-| `source` | varchar(30) | `webhook`, `polling`, `admin-poll` |
-| `signature_valid` | boolean | Always true (verified before saving) |
+| Monitoring dashboards (queue depth, match rate) | P0 | 1 day |
+| Alerting for critical exceptions | P0 | 1 day |
+| DLQ visibility in admin UI | P0 | 1 day |
+| Security review (secrets, CORS, auth, PII scrubbing) | P0 | 2 days |
+| Load testing (simulate 10K webhooks/day) | P1 | 1 day |
+| Runbook: recovery procedures | P1 | 0.5 days |
 
-### Table: `transactions`
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | bigint PK | |
-| `provider` | varchar(30) | |
-| `provider_transaction_id` | varchar(120) | UNIQUE with provider |
-| `provider_event_id` | varchar(120) | Most recent event that updated this |
-| `merchant_id` | varchar(60) | |
-| `order_id` | varchar(120) | Internal order ID |
-| `provider_order_id` | varchar(120) | Provider's order ID |
-| `parent_transaction_id` | bigint FK | Refund → Payment link |
-| `event_type` | enum | `PAYMENT`, `REFUND`, `CHARGEBACK` |
-| `status` | enum | `AUTHORIZED`, `CAPTURED`, `FAILED`, `REFUNDED`, `DISPUTED` |
-| `reconciliation_status` | enum | `PENDING`, `PENDING_SETTLEMENT`, `MATCHED`, `EXCEPTION` |
-| `presentment_amount` | bigint | In smallest currency unit |
-| `presentment_currency` | char(3) | `INR`, `USD`, etc. |
-| `fee_amount` | bigint | Platform fee |
-| `tax_amount` | bigint | GST or tax on fee |
-| `net_amount` | bigint | `presentment - fee - tax` |
-| `settlement_id` | varchar(120) | Provider's settlement ID |
-| `user_id` | bigint FK | Resolved payer identity |
-| `exception_id` | bigint FK | Linked exception record |
-| `payer_email` | varchar | |
-| `payer_phone` | varchar | |
-| `payment_method` | varchar | `card`, `upi`, `netbanking` |
-| `event_occurred_at` | timestamptz | Provider-reported event time |
-| `matched_at` | timestamptz | When reconciliation succeeded |
-
-### Table: `users`
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | bigint PK | |
-| `merchant_id` | varchar(60) | |
-| `email` | varchar | UNIQUE with merchant_id |
-| `phone` | varchar | UNIQUE with merchant_id |
-| `name` | varchar | |
-| `first_seen_at` | timestamptz | |
-| `last_seen_at` | timestamptz | Updated on every transaction |
-| `total_txn_count` | int | Atomically incremented |
-| `total_txn_amount` | bigint | Running total |
-| `failed_txn_count` | int | Count of failed transactions |
-
-### Table: `exception_records`
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | bigint PK | |
-| `merchant_id` | varchar(60) | |
-| `exception_type` | enum | See exception types above |
-| `severity` | enum | `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` |
-| `transaction_id` | bigint FK | Linked transaction (nullable) |
-| `settlement_id` | bigint FK | Linked settlement (nullable) |
-| `expected_amount` | bigint | What was expected |
-| `actual_amount` | bigint | What was found |
-| `discrepancy_amount` | bigint | `actual - expected` |
-| `currency` | char(3) | |
-| `description` | text | Human-readable explanation |
-| `status` | enum | `OPEN`, `IN_REVIEW`, `RESOLVED`, `IGNORED` |
-| `resolved_by` | varchar(60) | Actor who closed the exception |
-| `resolved_at` | timestamptz | |
-| `resolution_notes` | text | Notes from the ops team |
-| `detected_at` | timestamptz | When the rule created this |
-
-### Table: `settlements`
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | bigint PK | |
-| `provider` | varchar(30) | |
-| `provider_settlement_id` | varchar(120) | |
-| `merchant_id` | varchar(60) | |
-| `gross_amount` | bigint | |
-| `total_fees` | bigint | |
-| `total_tax` | bigint | |
-| `net_amount` | bigint | `gross - fees - tax` |
-| `currency` | char(3) | |
-| `bank_credit_amount` | bigint | Actual bank credit |
-| `bank_credit_date` | date | |
-| `utr_number` | varchar(60) | Bank UTR reference |
-| `settlement_status` | enum | `PENDING`, `SETTLED`, `MATCHED_TO_BANK`, `DISCREPANT`, `ON_HOLD` |
-| `transaction_count` | int | Expected number of transactions |
-| `settled_at` | timestamptz | |
-
-### Table: `audit_logs`
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | bigint PK | |
-| `actor` | varchar | Who performed the action |
-| `action` | varchar | Action name |
-| `entity_type` | varchar | Type of entity affected |
-| `entity_id` | bigint | PK of the affected entity |
-| `old_value` | jsonb | State before change |
-| `new_value` | jsonb | State after change |
-| `ip_address` | inet | Client IP (PostgreSQL native type) |
-| `created_at` | timestamptz | Immutable |
+**Exit Criteria**: System runs unattended for 48 hours with no data loss. Alerts fire correctly.
 
 ---
 
-## 21. API Reference
+### Phase 5: User Identity Foundation (Week 9+)
 
-### Webhook endpoints (public — no JWT required)
+**Goal**: User resolution running, data quality improving, ready for fraud detection later.
 
-| Method | Path | Header | Description |
+| Task | Priority | Effort |
+|---|---|---|
+| User identity resolution on ingestion | P1 | 2 days |
+| User aggregate updates (txn count, amounts) | P1 | 1 day |
+| UPI VPA storage and indexing | P1 | 0.5 days |
+| Settlement → bank statement matching (manual upload) | P2 | 3 days |
+
+---
+
+## 18. Known Risks & Mitigation
+
+| Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| POST | `/webhooks/razorpay` | `X-Razorpay-Signature` | Receive Razorpay event |
-| POST | `/webhooks/stripe` | `Stripe-Signature` | Receive Stripe event |
-
-Both return `200 "received"` on success, `400 "Invalid signature"` on failure.
-
-### Dashboard
-
-| Method | Path | Params | Description |
-|---|---|---|---|
-| GET | `/api/v1/dashboard/summary` | `days` (default 7) | Transaction and exception summary |
-| GET | `/api/v1/dashboard/metrics` | — | Real-time metrics |
-
-### Exceptions
-
-| Method | Path | Params / Body | Description |
-|---|---|---|---|
-| GET | `/api/v1/exceptions` | `days`, `status`, `provider`, `type`, `page`, `limit` | List exceptions |
-| GET | `/api/v1/exceptions/{id}` | — | Exception detail + linked transaction + audit trail |
-| PATCH | `/api/v1/exceptions/{id}` | `{status, notes}` + `X-Actor` header | Update exception status |
-
-### Transactions
-
-| Method | Path | Params | Description |
-|---|---|---|---|
-| GET | `/api/v1/transactions` | `provider`, `status`, `from`, `to`, `page`, `limit` | List transactions |
-| GET | `/api/v1/transactions/{id}` | — | Transaction detail |
-
-### Settlements
-
-| Method | Path | Params | Description |
-|---|---|---|---|
-| GET | `/api/v1/settlements` | `provider`, `status`, `dateFrom`, `dateTo`, `page`, `limit` | List settlements |
-| GET | `/api/v1/settlements/{id}` | — | Settlement detail with linked transaction count |
-| GET | `/api/v1/settlements/{id}/transactions` | — | All transactions in a settlement |
-
-### Admin (requires JWT + `X-Actor` header)
-
-| Method | Path | Body | Description |
-|---|---|---|---|
-| POST | `/api/v1/admin/replay` | `{webhookEventId}` | Replay a failed webhook event |
-| POST | `/api/v1/admin/poll` | `{provider, from, to}` | Backfill events for a time window |
-| POST | `/api/v1/admin/settlement-reconciler/run` | — | Manually trigger settlement reconciler |
-| GET | `/api/v1/admin/audit-logs` | `entityType`, `entityId`, `actor` | Search audit logs |
+| Webhook silent drop (provider outage) | Medium | High | Polling fallback — mandatory, not optional |
+| Out-of-order event processing overwrites newer state | High | Medium | State machine: only update if incoming event is newer |
+| Fee data missing at reconciliation time | High | Low | Pending settlement state; don't flag as exception until settled |
+| UPI VPA not resolving to user identity | High | Low | Store VPA, skip user resolution for UPI until Phase 5 |
+| Razorpay/Stripe API rate limits hit during polling | Low | Medium | Respect rate limits with exponential backoff; paginate at 100/request |
+| Stripe 5-minute signature replay window missed | Medium | Medium | Verify AND store raw event in same transaction before returning 200 |
+| PII data stored unencrypted | Low | Critical | Encrypt email/phone columns in Phase 4 hardening |
+| Multi-tenant data leak (merchant A sees merchant B's data) | Low | Critical | Row-level security + mandatory `merchant_id` filter on all queries |
+| Settlement discrepancy due to partial capture | Medium | Medium | Track `captured_amount` separately from `authorized_amount` |
 
 ---
 
-## 22. Configuration Reference
-
-All configuration is in `src/main/resources/application.yml`. Secrets come from environment variables.
-
-```yaml
-app:
-  merchant:
-    id: ${MERCHANT_ID:merchant_001}             # Default merchant ID
-
-  razorpay:
-    key-id: ${RAZORPAY_KEY_ID}                  # Razorpay API key for polling
-    key-secret: ${RAZORPAY_KEY_SECRET}          # Razorpay API secret for polling
-    webhook-secret: ${RAZORPAY_WEBHOOK_SECRET}  # Used to verify webhook signatures
-
-  stripe:
-    secret-key: ${STRIPE_SECRET_KEY}            # Stripe API key for polling
-    webhook-secret: ${STRIPE_WEBHOOK_SECRET}    # Used to verify webhook signatures
-
-  jwt:
-    secret: ${JWT_SECRET}                       # HMAC secret for signing JWTs
-    expiry-hours: 24
-
-  reconciliation:
-    run-interval-minutes: 5                     # How often ReconciliationJob runs
-    missing-capture-threshold-hours: 24         # Threshold for MissingCaptureRule
-    amount-tolerance-paisa: 100                 # Tolerance for SettlementTotalRule (₹1)
-    settlement-overdue-days: 7                  # Threshold for SettlementReconcilerJob Phase 2
-
-  polling:
-    gap-filler-interval-minutes: 15             # How often GapFillerJob runs
-    gap-filler-lookback-minutes: 30             # How far back GapFillerJob looks
-
-  encryption:
-    key: ${APP_ENCRYPTION_KEY}                  # AES key for EncryptionService
-
-db-scheduler:
-  enabled: true
-  threads: 5
-  polling-interval: 10s
-  table-name: scheduled_tasks
-```
-
-### Environment variables required in production
-
-| Variable | Purpose |
-|---|---|
-| `DB_URL` | PostgreSQL JDBC URL |
-| `DB_USERNAME` | Database user |
-| `DB_PASSWORD` | Database password |
-| `RAZORPAY_KEY_ID` | Razorpay API key (for polling) |
-| `RAZORPAY_KEY_SECRET` | Razorpay API secret (for polling) |
-| `RAZORPAY_WEBHOOK_SECRET` | Webhook HMAC secret |
-| `STRIPE_SECRET_KEY` | Stripe API key (for polling) |
-| `STRIPE_WEBHOOK_SECRET` | Webhook HMAC secret |
-| `JWT_SECRET` | JWT signing key |
-| `APP_ENCRYPTION_KEY` | AES encryption key |
-| `MERCHANT_ID` | Merchant identifier |
-
----
-
-## 23. Testing Strategy
-
-### Test philosophy
-
-All existing tests are unit tests using Mockito mocks. There is no in-memory database dependency — tests wire real service objects with mocked repositories and external clients. This keeps tests fast and focused on business logic.
-
-### Test files and what they cover
-
-| Test file | Coverage |
-|---|---|
-| `WebhookIngestionServiceTest` | Save new event + queue processing; ignore duplicate via unique violation |
-| `WebhookControllerTest` | Signature validation pass/fail; controller returns correct HTTP status |
-| `RazorpaySignatureServiceTest` | HMAC-SHA256 verification logic |
-| `StripeSignatureServiceTest` | Stripe signature verification |
-| `TransactionProcessingServiceTest` | User resolution; refund linking; error path sets processingError |
-| `NormalizationServiceTest` | Razorpay and Stripe payloads produce correct canonical Transaction fields |
-| `TransactionServiceTest` | Upsert insert path; upsert merge path (newer wins); upsert skip path (older loses) |
-| `ReconciliationEngineTest` | One rule failing does not block subsequent rules |
-| `RuleBehaviorTest` | Each of the 4 transaction-level rules: candidate detection + exception creation |
-| `ExceptionRecordServiceTest` | Deduplication: does not create a second exception for same (type, txnId) |
-| `AdminServicePollTest` | Razorpay poll fetches payments+refunds; Stripe poll fetches charges+refunds; unknown provider throws; audit is called |
-| `AdminPollToIngestionIntegrationTest` | Full chain: AdminService → real WebhookIngestionService → repo + processingService. Verifies event saved with correct source and provider. Tests deduplication in the chain. |
-| `SettlementReconcilerJobTest` | Phase 1: MATCHED_TO_BANK when no exceptions; stays SETTLED when exceptions open. Phase 2: creates exception for overdue; skips already-flagged. Mixed batch; audit always called. |
-| `ExceptionQueryServiceTest` | list() window filter; status filter; type filter; pagination; summary counts. detail() with and without linked transaction. update() for each terminal status (RESOLVED, IGNORED sets resolvedAt). |
-
-### Running tests
-
-```bash
-./gradlew test
-```
-
-All 53 tests pass with no failures.
-
-### Key patterns used in tests
-
-**Constructing services directly:**
-```java
-// Services are instantiated with mocked dependencies — no Spring context needed
-service = new WebhookIngestionService(
-    mock(WebhookEventRepository.class),
-    mock(TransactionProcessingService.class),
-    new ObjectMapper()
-);
-```
-
-**Integration test pattern (AdminPollToIngestionIntegrationTest):**
-Real service objects are wired together, with only infrastructure mocked (repositories, external API clients). This tests that the services communicate correctly without needing a database.
-
-**ArgumentCaptor for verifying what was saved:**
-```java
-ArgumentCaptor<WebhookEvent> captor = ArgumentCaptor.forClass(WebhookEvent.class);
-verify(repository).save(captor.capture());
-assertThat(captor.getValue().getSource()).isEqualTo("admin-poll");
-```
+*Document Version 2.0 — Covers Razorpay + Stripe MVP*
+*Authors: Engineering Team*
+*Next Review: After Phase 3 completion*

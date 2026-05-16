@@ -5,6 +5,7 @@ import com.razorpay.Entity;
 import com.razorpay.RazorpayClient;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -17,6 +18,12 @@ public class RazorpayPollingService {
 
     private final RazorpayClient razorpayClient;
     private final ObjectMapper objectMapper;
+
+    @Value("${app.razorpay.key-id:}")
+    private String keyId;
+
+    @Value("${app.razorpay.key-secret:}")
+    private String keySecret;
 
     private static final int PAGE_SIZE = 100;
     private static final int MAX_RETRIES = 3;
@@ -34,6 +41,11 @@ public class RazorpayPollingService {
 
     private List<byte[]> fetchPaginated(String entity, OffsetDateTime from, OffsetDateTime to) {
         List<byte[]> results = new ArrayList<>();
+        if (!hasUsableCredentials()) {
+            log.info("Skipping Razorpay {} polling because real API credentials are not configured", entity);
+            return results;
+        }
+
         int skip = 0;
 
         while (true) {
@@ -94,5 +106,16 @@ public class RazorpayPollingService {
             }
         }
         return null;
+    }
+
+    private boolean hasUsableCredentials() {
+        return hasText(keyId)
+                && hasText(keySecret)
+                && !keyId.contains("placeholder")
+                && !keySecret.contains("placeholder");
+    }
+
+    private boolean hasText(String value) {
+        return value != null && !value.isBlank();
     }
 }

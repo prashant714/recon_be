@@ -2,7 +2,7 @@ spring:
   application:
     name: reconciliation-platform
   datasource:
-    url: ${DB_URL:jdbc:postgresql://localhost:5432/reconciliation_dev}
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/reconciliation_dev}
     username: ${DB_USERNAME:recon_user}
     password: ${DB_PASSWORD:recon_pass}
     driver-class-name: org.postgresql.Driver
@@ -85,7 +85,7 @@ app:
     webhook-secret: ${RAZORPAY_WEBHOOK_SECRET:razorpay_webhook_secret}
   stripe:
     secret-key: ${STRIPE_SECRET_KEY:sk_test_placeholder}
-    webhook-secret: ${STRIPE_WEBHOOK_SECRET:whsec_placeholder}
+    webhook-secret: ${STRIPE_WEBHOOK_SECRET:whsec_1fb94749d850d4e15c20f3d41aeb381e1a92ed3121eea298626bcd9121a2bbcd}
   reconciliation:
     run-interval-minutes: 5
     missing-capture-threshold-hours: 24
