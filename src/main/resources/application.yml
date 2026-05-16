@@ -85,16 +85,16 @@ app:
     webhook-secret: ${RAZORPAY_WEBHOOK_SECRET:razorpay_webhook_secret}
   stripe:
     secret-key: ${STRIPE_SECRET_KEY:sk_test_placeholder}
-    webhook-secret: ${STRIPE_WEBHOOK_SECRET:whsec_1fb94749d850d4e15c20f3d41aeb381e1a92ed3121eea298626bcd9121a2bbcd}
+    webhook-secret: ${STRIPE_WEBHOOK_SECRET:whsec_placeholder}
   reconciliation:
     run-interval-minutes: 5
     missing-capture-threshold-hours: 24
     amount-tolerance-paisa: 100
   jwt:
-    secret: ${JWT_SECRET:v9y$B&E)H@McQfTjWnZr4u7x!A%C*F-JaNdRgUkXp2s5v8y/B?E(G+KbPeShVmYq}
+    secret: ${JWT_SECRET:change_me_to_a_random_32_plus_character_secret}
     expiry-hours: 24
   encryption:
-    key: ${APP_ENCRYPTION_KEY:MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
+    key: ${APP_ENCRYPTION_KEY:MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=}
   polling:
     gap-filler-interval-minutes: 15
     gap-filler-lookback-minutes: 30
