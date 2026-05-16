@@ -1,0 +1,8 @@
+.git
+.gradle
+.idea
+build
+node_modules
+docs/diagram_assets/*.svg
+*.log
+.DS_Store
