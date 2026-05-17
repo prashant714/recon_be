@@ -75,6 +75,12 @@ public class UserIdentityService {
         userRepository.incrementAggregates(userId, amount, failed ? 1 : 0);
     }
 
+    @Transactional
+    public void refreshAggregates(Long userId) {
+        if (userId == null) return;
+        userRepository.refreshAggregates(userId);
+    }
+
     private Long createUser(String merchantId, String email,
                             String phone, String name) {
         try {

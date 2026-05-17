@@ -81,7 +81,7 @@ class TransactionProcessingServiceTest {
         service.processAsync(1L, "razorpay");
 
         verify(transactionService).upsert(any(Transaction.class));
-        verify(userIdentityService).incrementAggregates(10L, 1000L, false);
+        verify(userIdentityService).refreshAggregates(10L);
         verify(webhookEventRepository).save(any(WebhookEvent.class));
         verify(webhookEventRepository, never()).markAsFailed(eq(1L), any(), any());
     }

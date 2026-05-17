@@ -27,4 +27,39 @@ public interface UserRepository extends JpaRepository<User, Long> {
         @org.springframework.data.repository.query.Param("amount") long amount,
         @org.springframework.data.repository.query.Param("failedIncrement") int failedIncrement
     );
+
+    @org.springframework.data.jpa.repository.Modifying
+    @org.springframework.data.jpa.repository.Query(value = """
+        UPDATE users u SET
+            total_txn_count = (
+                SELECT COUNT(*)
+                FROM transactions t
+                WHERE t.user_id = :userId
+                  AND t.event_type = 'PAYMENT'
+            ),
+            total_txn_amount = (
+                SELECT COALESCE(SUM(t.presentment_amount), 0)
+                FROM transactions t
+                WHERE t.user_id = :userId
+                  AND t.event_type = 'PAYMENT'
+                  AND t.status = 'CAPTURED'
+            ),
+            failed_txn_count = (
+                SELECT COUNT(*)
+                FROM transactions t
+                WHERE t.user_id = :userId
+                  AND t.event_type = 'PAYMENT'
+                  AND t.status = 'FAILED'
+            ),
+            distinct_payment_methods = (
+                SELECT COUNT(DISTINCT t.payment_method)
+                FROM transactions t
+                WHERE t.user_id = :userId
+                  AND t.payment_method IS NOT NULL
+            ),
+            last_seen_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE u.id = :userId
+        """, nativeQuery = true)
+    void refreshAggregates(@org.springframework.data.repository.query.Param("userId") Long userId);
 }

@@ -84,13 +84,10 @@ public class TransactionProcessingService {
 
             Transaction persisted = transactionService.upsert(transaction);
 
-            // Increment user aggregates atomically
+            // Recompute aggregates from canonical transactions so retries,
+            // replays, and multi-stage provider events stay idempotent.
             if (persisted.getUserId() != null) {
-                userIdentityService.incrementAggregates(
-                    persisted.getUserId(),
-                    persisted.getPresentmentAmount(),
-                    persisted.getStatus() == com.reconciliation.common.enums.TransactionStatus.FAILED
-                );
+                userIdentityService.refreshAggregates(persisted.getUserId());
             }
 
             markProcessed(webhookEvent);
