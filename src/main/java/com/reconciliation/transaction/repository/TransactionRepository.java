@@ -18,6 +18,14 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long> 
     Optional<Transaction> findByProviderAndProviderTransactionId(
             String provider, String providerTransactionId);
 
+    @Query(value = """
+        SELECT 1
+        FROM pg_advisory_xact_lock(hashtext(:provider), hashtext(:providerTransactionId))
+        """, nativeQuery = true)
+    Integer lockProviderTransactionId(
+            @Param("provider") String provider,
+            @Param("providerTransactionId") String providerTransactionId);
+
     boolean existsByProviderAndProviderTransactionId(
             String provider, String providerTransactionId);
 

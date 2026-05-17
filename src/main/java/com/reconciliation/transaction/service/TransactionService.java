@@ -22,6 +22,9 @@ public class TransactionService {
 
     @Transactional
     public Transaction upsert(Transaction incoming) {
+        transactionRepository.lockProviderTransactionId(
+                incoming.getProvider(), incoming.getProviderTransactionId());
+
         Optional<Transaction> existing = transactionRepository.findByProviderAndProviderTransactionId(
                 incoming.getProvider(), incoming.getProviderTransactionId());
 
