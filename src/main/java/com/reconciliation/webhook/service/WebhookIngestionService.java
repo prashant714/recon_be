@@ -75,10 +75,40 @@ public class WebhookIngestionService {
 
     private String extractEventId(JsonNode payload, String provider) {
         return switch (provider) {
-            case "razorpay" -> payload.path("id").asText(null);
+            case "razorpay" -> extractRazorpayEventId(payload);
             case "stripe"   -> payload.path("id").asText(null);
             default         -> payload.path("id").asText(null);
         };
+    }
+
+    private String extractRazorpayEventId(JsonNode payload) {
+        String topLevelId = payload.path("id").asText(null);
+        if (hasText(topLevelId)) {
+            return topLevelId;
+        }
+
+        String eventType = payload.path("event").asText("unknown");
+        String objectId = firstText(
+                payload.path("payload").path("payment").path("entity").path("id").asText(null),
+                payload.path("payload").path("refund").path("entity").path("id").asText(null),
+                payload.path("payload").path("settlement").path("entity").path("id").asText(null),
+                payload.path("payload").path("dispute").path("entity").path("id").asText(null)
+        );
+
+        return hasText(objectId) ? eventType + ":" + objectId : null;
+    }
+
+    private String firstText(String... values) {
+        for (String value : values) {
+            if (hasText(value)) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private boolean hasText(String value) {
+        return value != null && !value.isBlank();
     }
 
     private String extractEventType(JsonNode payload, String provider) {

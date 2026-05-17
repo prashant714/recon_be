@@ -42,7 +42,29 @@ class WebhookIngestionServiceTest {
         verify(repository).save(captor.capture());
         assertThat(captor.getValue().getEventType()).isEqualTo("payment.captured");
         assertThat(captor.getValue().getProvider()).isEqualTo("razorpay");
+        assertThat(captor.getValue().getProviderEventId()).isEqualTo("evt_123");
         verify(processingService).processAsync(55L, "razorpay");
+    }
+
+    @Test
+    void derivesRazorpayEventIdFromNestedPaymentWhenTopLevelIdIsMissing() {
+        String payload = """
+                {"event":"payment.captured","payload":{"payment":{"entity":{"id":"pay_123"}}}}
+                """;
+
+        when(repository.save(any(WebhookEvent.class))).thenAnswer(invocation -> {
+            WebhookEvent event = invocation.getArgument(0);
+            event.setId(56L);
+            return event;
+        });
+
+        service.ingestAsync(payload.getBytes(), "razorpay", "webhook");
+
+        ArgumentCaptor<WebhookEvent> captor = ArgumentCaptor.forClass(WebhookEvent.class);
+        verify(repository).save(captor.capture());
+        assertThat(captor.getValue().getEventType()).isEqualTo("payment.captured");
+        assertThat(captor.getValue().getProviderEventId()).isEqualTo("payment.captured:pay_123");
+        verify(processingService).processAsync(56L, "razorpay");
     }
 
     @Test
