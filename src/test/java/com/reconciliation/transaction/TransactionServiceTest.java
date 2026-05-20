@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class TransactionServiceTest {
@@ -93,5 +94,52 @@ class TransactionServiceTest {
         service.linkRefundToParent(refund, payload, "razorpay");
 
         assertThat(refund.getParentTransactionId()).isEqualTo(77L);
+    }
+
+    @Test
+    void upsertPromotesAuthorizedPaymentToCapturedWhenTimestampsMatch() {
+        OffsetDateTime occurredAt = OffsetDateTime.parse("2024-01-01T10:00:00Z");
+
+        Transaction existing = Transaction.builder()
+                .id(1L)
+                .provider("razorpay")
+                .providerTransactionId("pay_1")
+                .merchantId("merchant_001")
+                .eventType(EventType.PAYMENT)
+                .status(TransactionStatus.AUTHORIZED)
+                .presentmentAmount(1000L)
+                .presentmentCurrency("INR")
+                .eventOccurredAt(occurredAt)
+                .reconciliationStatus(ReconciliationStatus.PENDING)
+                .build();
+        Transaction incoming = Transaction.builder()
+                .provider("razorpay")
+                .providerTransactionId("pay_1")
+                .providerEventId("payment.captured:pay_1")
+                .merchantId("merchant_001")
+                .eventType(EventType.PAYMENT)
+                .status(TransactionStatus.CAPTURED)
+                .presentmentAmount(1000L)
+                .presentmentCurrency("INR")
+                .eventOccurredAt(occurredAt)
+                .capturedAt(occurredAt.plusSeconds(5))
+                .feeAmount(30L)
+                .taxAmount(5L)
+                .netAmount(965L)
+                .reconciliationStatus(ReconciliationStatus.PENDING_SETTLEMENT)
+                .build();
+
+        when(repository.findByProviderAndProviderTransactionId("razorpay", "pay_1"))
+                .thenReturn(Optional.of(existing));
+        when(repository.save(existing)).thenReturn(existing);
+
+        Transaction result = service.upsert(incoming);
+
+        assertThat(result).isSameAs(existing);
+        assertThat(existing.getStatus()).isEqualTo(TransactionStatus.CAPTURED);
+        assertThat(existing.getProviderEventId()).isEqualTo("payment.captured:pay_1");
+        assertThat(existing.getNetAmount()).isEqualTo(965L);
+        assertThat(existing.getReconciliationStatus()).isEqualTo(ReconciliationStatus.PENDING_SETTLEMENT);
+        verify(repository).save(existing);
     }
 }

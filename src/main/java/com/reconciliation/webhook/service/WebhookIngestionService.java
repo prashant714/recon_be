@@ -13,7 +13,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 @Service
 @RequiredArgsConstructor
@@ -29,7 +28,6 @@ public class WebhookIngestionService {
      * Stores raw event, then hands off async processing.
      * Returns immediately — never blocks the webhook controller.
      */
-    @Transactional
     public void ingestAsync(byte[] rawBody, String provider, String source) {
         try {
             JsonNode payload = objectMapper.readTree(rawBody);

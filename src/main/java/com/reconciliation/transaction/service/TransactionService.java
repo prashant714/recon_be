@@ -33,10 +33,14 @@ public class TransactionService {
         }
 
         Transaction current = existing.get();
-        if (incoming.getEventOccurredAt() != null
-                && current.getEventOccurredAt() != null
-                && !incoming.getEventOccurredAt().isAfter(current.getEventOccurredAt())) {
-            return current;
+        if (incoming.getEventOccurredAt() != null && current.getEventOccurredAt() != null) {
+            if (incoming.getEventOccurredAt().isBefore(current.getEventOccurredAt())) {
+                return current;
+            }
+            if (incoming.getEventOccurredAt().isEqual(current.getEventOccurredAt())
+                    && !isMeaningfulStateAdvance(current, incoming)) {
+                return current;
+            }
         }
 
         current.setProviderEventId(incoming.getProviderEventId());
@@ -129,5 +133,24 @@ public class TransactionService {
         java.util.Map<String, Object> merged = new java.util.LinkedHashMap<>(current);
         merged.putAll(incoming);
         return merged;
+    }
+
+    private static boolean isMeaningfulStateAdvance(Transaction current, Transaction incoming) {
+        return statusRank(incoming.getStatus()) > statusRank(current.getStatus());
+    }
+
+    private static int statusRank(com.reconciliation.common.enums.TransactionStatus status) {
+        if (status == null) {
+            return -1;
+        }
+        return switch (status) {
+            case PENDING -> 0;
+            case AUTHORIZED -> 1;
+            case FAILED, CANCELLED -> 2;
+            case CAPTURED, PENDING_SETTLEMENT -> 3;
+            case PARTIALLY_REFUNDED -> 4;
+            case REFUNDED -> 5;
+            case DISPUTED -> 6;
+        };
     }
 }

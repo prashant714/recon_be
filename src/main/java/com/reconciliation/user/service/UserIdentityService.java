@@ -41,8 +41,10 @@ public class UserIdentityService {
             Optional<User> byEmail = userRepository
                     .findByMerchantIdAndEmail(merchantId, normalizedEmail);
             if (byEmail.isPresent()) {
-                updateLastSeen(byEmail.get());
-                return byEmail.get().getId();
+                User user = byEmail.get();
+                enrichUser(user, normalizedPhone, name);
+                updateLastSeen(user);
+                return user.getId();
             }
         }
 
@@ -51,11 +53,8 @@ public class UserIdentityService {
             Optional<User> byPhone = userRepository
                     .findByMerchantIdAndPhone(merchantId, normalizedPhone);
             if (byPhone.isPresent()) {
-                // Backfill email if we now have it
                 User u = byPhone.get();
-                if (u.getEmail() == null && normalizedEmail != null) {
-                    u.setEmail(normalizedEmail);
-                }
+                enrichUser(u, normalizedEmail, name);
                 updateLastSeen(u);
                 return u.getId();
             }
@@ -115,6 +114,18 @@ public class UserIdentityService {
     private void updateLastSeen(User user) {
         user.setLastSeenAt(OffsetDateTime.now());
         userRepository.save(user);
+    }
+
+    private void enrichUser(User user, String alternateIdentity, String name) {
+        if (!StringUtils.hasText(user.getEmail()) && alternateIdentity != null && alternateIdentity.contains("@")) {
+            user.setEmail(alternateIdentity);
+        }
+        if (!StringUtils.hasText(user.getPhone()) && alternateIdentity != null && !alternateIdentity.contains("@")) {
+            user.setPhone(alternateIdentity);
+        }
+        if (!StringUtils.hasText(user.getName()) && StringUtils.hasText(name)) {
+            user.setName(name.trim());
+        }
     }
 
     private String normalize(String email) {

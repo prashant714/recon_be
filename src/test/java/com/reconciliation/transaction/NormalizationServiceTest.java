@@ -45,6 +45,37 @@ class NormalizationServiceTest {
     }
 
     @Test
+    void normalizesRazorpayPayerNameFromCardNameWhenTopLevelNameIsMissing() throws Exception {
+        String payload = """
+                {
+                  "id": "evt_1",
+                  "event": "payment.captured",
+                  "payload": {
+                    "payment": {
+                      "entity": {
+                        "id": "pay_1",
+                        "order_id": "order_1",
+                        "amount": 2500,
+                        "currency": "inr",
+                        "created_at": 1710000000,
+                        "email": "payer@example.com",
+                        "contact": "9999999999",
+                        "card": {
+                          "name": "Shrey Mishra"
+                        }
+                      }
+                    }
+                  }
+                }
+                """;
+
+        Transaction transaction = service.normalizeRazorpayPaymentCaptured(
+                objectMapper.readTree(payload), "merchant_001");
+
+        assertThat(transaction.getPayerName()).isEqualTo("Shrey Mishra");
+    }
+
+    @Test
     void normalizesStripeChargeSucceeded() throws Exception {
         String payload = """
                 {

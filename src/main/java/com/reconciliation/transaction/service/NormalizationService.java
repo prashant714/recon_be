@@ -270,7 +270,9 @@ public class NormalizationService {
                 .vpa(p.path("vpa").asText(null))
                 .payerEmail(p.path("email").asText(null))
                 .payerPhone(p.path("contact").asText(null))
-                .payerName(p.path("name").asText(null))
+                .payerName(firstText(
+                        p.path("name").asText(null),
+                        p.path("card").path("name").asText(null)))
                 .eventOccurredAt(fromUnix(p.path("created_at").asLong()));
     }
 
@@ -284,6 +286,15 @@ public class NormalizationService {
 
     private JsonNode stripeObject(JsonNode payload) {
         return payload.path("data").path("object");
+    }
+
+    private String firstText(String... values) {
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return null;
     }
 
     private OffsetDateTime fromUnix(long epochSeconds) {
