@@ -2,6 +2,7 @@ package com.reconciliation.admin.controller;
 
 import com.reconciliation.admin.service.AdminService;
 import com.reconciliation.audit.service.AuditService;
+import com.reconciliation.paymentflow.service.PaymentFlowEventService;
 import com.reconciliation.reconciliation.job.SettlementReconcilerJob;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.OffsetDateTime;
@@ -23,6 +24,7 @@ public class AdminController {
 
     private final AdminService adminService;
     private final AuditService auditService;
+    private final PaymentFlowEventService paymentFlowEventService;
     private final SettlementReconcilerJob settlementReconcilerJob;
 
     @PostMapping("/poll")
@@ -55,6 +57,15 @@ public class AdminController {
             @RequestParam(required = false) Long entityId,
             @RequestParam(required = false) String actor) {
         return Map.of("items", auditService.search(entityType, entityId, actor));
+    }
+
+    @GetMapping("/payment-flow-events")
+    public Map<String, Object> paymentFlowEvents(
+            @RequestParam(required = false) String providerTransactionId,
+            @RequestParam(required = false) Long webhookEventId,
+            @RequestParam(required = false) Long userId,
+            @RequestParam(defaultValue = "100") int limit) {
+        return Map.of("items", paymentFlowEventService.search(providerTransactionId, webhookEventId, userId, limit));
     }
 
     public record PollRequest(

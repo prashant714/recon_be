@@ -1,13 +1,12 @@
 package com.reconciliation.webhook.service;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.reconciliation.webhook_event.entity.WebhookEvent;
 import com.reconciliation.webhook_event.repository.WebhookEventRepository;
-import java.io.IOException;
+import com.reconciliation.paymentflow.service.PaymentFlowEventService;
 import java.time.OffsetDateTime;
-import java.util.Locale;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,6 +22,7 @@ public class WebhookIngestionService {
 
     private final WebhookEventRepository webhookEventRepository;
     private final TransactionProcessingService processingService;
+    private final PaymentFlowEventService paymentFlowEventService;
     private final ObjectMapper objectMapper;
 
     /**
@@ -45,9 +45,31 @@ public class WebhookIngestionService {
 
             log.info("Received event provider={} type={} id={} source={}",
                      provider, eventType, providerEventId, source);
+            paymentFlowEventService.record(
+                    provider,
+                    providerEventId,
+                    extractObjectId(payload, provider),
+                    null,
+                    null,
+                    source,
+                    "INGEST_RECEIVED",
+                    "RECEIVED",
+                    "Webhook or polled event received",
+                    metadata("eventType", eventType));
 
             if (webhookEventRepository.existsByProviderAndProviderEventId(provider, providerEventId)) {
                 log.info("Duplicate event ignored provider={} id={}", provider, providerEventId);
+                paymentFlowEventService.record(
+                        provider,
+                        providerEventId,
+                        extractObjectId(payload, provider),
+                        null,
+                        null,
+                        source,
+                        "INGEST_DUPLICATE",
+                        "IGNORED",
+                        "Duplicate provider event ignored",
+                        metadata("eventType", eventType));
                 return;
             }
 
@@ -68,8 +90,31 @@ public class WebhookIngestionService {
             } catch (DataIntegrityViolationException e) {
                 // UNIQUE (provider, provider_event_id) violated — duplicate event
                 log.info("Duplicate event ignored provider={} id={}", provider, providerEventId);
+                paymentFlowEventService.record(
+                        provider,
+                        providerEventId,
+                        extractObjectId(payload, provider),
+                        null,
+                        null,
+                        source,
+                        "INGEST_DUPLICATE",
+                        "IGNORED",
+                        "Duplicate provider event ignored after insert race",
+                        metadata("eventType", eventType));
                 return;
             }
+
+            paymentFlowEventService.record(
+                    provider,
+                    providerEventId,
+                    extractObjectId(payload, provider),
+                    saved.getId(),
+                    null,
+                    source,
+                    "INGEST_STORED",
+                    "SUCCESS",
+                    "Raw event stored",
+                    metadata("eventType", eventType));
 
             // Async: do not await — controller already returned 200
             processingService.processAsync(saved.getId(), provider);
@@ -77,6 +122,22 @@ public class WebhookIngestionService {
         } catch (Exception e) {
             log.error("Failed to ingest event from provider={}: {}", provider, e.getMessage(), e);
         }
+    }
+
+    private String extractObjectId(JsonNode payload, String provider) {
+        return switch (provider) {
+            case "razorpay" -> firstText(
+                    payload.path("payload").path("payment").path("entity").path("id").asText(null),
+                    payload.path("payload").path("refund").path("entity").path("id").asText(null),
+                    payload.path("payload").path("settlement").path("entity").path("id").asText(null),
+                    payload.path("payload").path("dispute").path("entity").path("id").asText(null)
+            );
+            case "stripe" -> firstText(
+                    payload.path("data").path("object").path("id").asText(null),
+                    payload.path("id").asText(null)
+            );
+            default -> payload.path("id").asText(null);
+        };
     }
 
     private String extractEventId(JsonNode payload, String provider) {
@@ -125,5 +186,16 @@ public class WebhookIngestionService {
             case "stripe"   -> payload.path("type").asText("unknown");
             default         -> "unknown";
         };
+    }
+
+    private Map<String, Object> metadata(Object... pairs) {
+        Map<String, Object> values = new LinkedHashMap<>();
+        for (int i = 0; i + 1 < pairs.length; i += 2) {
+            Object value = pairs[i + 1];
+            if (value != null) {
+                values.put(String.valueOf(pairs[i]), value);
+            }
+        }
+        return values.isEmpty() ? null : values;
     }
 }

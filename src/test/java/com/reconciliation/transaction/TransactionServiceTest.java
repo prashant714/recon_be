@@ -8,6 +8,7 @@ import com.reconciliation.common.enums.TransactionStatus;
 import com.reconciliation.transaction.entity.Transaction;
 import com.reconciliation.transaction.repository.TransactionRepository;
 import com.reconciliation.transaction.service.TransactionService;
+import com.reconciliation.transaction.service.TransactionUpsertResult;
 import java.time.OffsetDateTime;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
@@ -51,9 +52,10 @@ class TransactionServiceTest {
         when(repository.findByProviderAndProviderTransactionId("RAZORPAY", "pay_1"))
                 .thenReturn(Optional.of(existing));
 
-        Transaction result = service.upsert(incoming);
+        TransactionUpsertResult result = service.upsert(incoming);
 
-        assertThat(result).isSameAs(existing);
+        assertThat(result.transaction()).isSameAs(existing);
+        assertThat(result.action()).isEqualTo(TransactionUpsertResult.Action.IGNORED);
         var inOrder = inOrder(repository);
         inOrder.verify(repository).lockProviderTransactionId("RAZORPAY", "pay_1");
         inOrder.verify(repository).findByProviderAndProviderTransactionId("RAZORPAY", "pay_1");
@@ -133,9 +135,10 @@ class TransactionServiceTest {
                 .thenReturn(Optional.of(existing));
         when(repository.save(existing)).thenReturn(existing);
 
-        Transaction result = service.upsert(incoming);
+        TransactionUpsertResult result = service.upsert(incoming);
 
-        assertThat(result).isSameAs(existing);
+        assertThat(result.transaction()).isSameAs(existing);
+        assertThat(result.action()).isEqualTo(TransactionUpsertResult.Action.UPDATED);
         assertThat(existing.getStatus()).isEqualTo(TransactionStatus.CAPTURED);
         assertThat(existing.getProviderEventId()).isEqualTo("payment.captured:pay_1");
         assertThat(existing.getNetAmount()).isEqualTo(965L);

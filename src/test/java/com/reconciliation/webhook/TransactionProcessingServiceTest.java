@@ -7,7 +7,9 @@ import com.reconciliation.common.enums.TransactionStatus;
 import com.reconciliation.transaction.entity.Transaction;
 import com.reconciliation.transaction.service.NormalizationService;
 import com.reconciliation.transaction.service.TransactionService;
+import com.reconciliation.transaction.service.TransactionUpsertResult;
 import com.reconciliation.user.service.UserIdentityService;
+import com.reconciliation.paymentflow.service.PaymentFlowEventService;
 import com.reconciliation.webhook.service.TransactionProcessingService;
 import com.reconciliation.webhook.service.WebhookEventStatusService;
 import com.reconciliation.webhook_event.entity.WebhookEvent;
@@ -33,6 +35,7 @@ class TransactionProcessingServiceTest {
     private final UserIdentityService userIdentityService = mock(UserIdentityService.class);
     private final WebhookEventRepository webhookEventRepository = mock(WebhookEventRepository.class);
     private final WebhookEventStatusService webhookEventStatusService = mock(WebhookEventStatusService.class);
+    private final PaymentFlowEventService paymentFlowEventService = mock(PaymentFlowEventService.class);
 
     private final TransactionProcessingService service = new TransactionProcessingService(
             webhookEventRepository,
@@ -40,6 +43,7 @@ class TransactionProcessingServiceTest {
             transactionService,
             userIdentityService,
             webhookEventStatusService,
+            paymentFlowEventService,
             objectMapper
     );
 
@@ -79,7 +83,10 @@ class TransactionProcessingServiceTest {
                 .thenReturn(normalized);
         when(userIdentityService.resolveUserId("merchant_001", "a@example.com", null, null))
                 .thenReturn(10L);
-        when(transactionService.upsert(any(Transaction.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(transactionService.upsert(any(Transaction.class))).thenAnswer(invocation -> {
+            Transaction tx = invocation.getArgument(0);
+            return new TransactionUpsertResult(tx, TransactionUpsertResult.Action.CREATED, null);
+        });
 
         service.processAsync(1L, "razorpay");
 

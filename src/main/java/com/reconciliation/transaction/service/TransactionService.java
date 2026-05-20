@@ -21,7 +21,7 @@ public class TransactionService {
     }
 
     @Transactional
-    public Transaction upsert(Transaction incoming) {
+    public TransactionUpsertResult upsert(Transaction incoming) {
         transactionRepository.lockProviderTransactionId(
                 incoming.getProvider(), incoming.getProviderTransactionId());
 
@@ -29,20 +29,24 @@ public class TransactionService {
                 incoming.getProvider(), incoming.getProviderTransactionId());
 
         if (existing.isEmpty()) {
-            return transactionRepository.save(incoming);
+            return new TransactionUpsertResult(
+                    transactionRepository.save(incoming),
+                    TransactionUpsertResult.Action.CREATED,
+                    null);
         }
 
         Transaction current = existing.get();
         if (incoming.getEventOccurredAt() != null && current.getEventOccurredAt() != null) {
             if (incoming.getEventOccurredAt().isBefore(current.getEventOccurredAt())) {
-                return current;
+                return new TransactionUpsertResult(current, TransactionUpsertResult.Action.IGNORED, current.getStatus());
             }
             if (incoming.getEventOccurredAt().isEqual(current.getEventOccurredAt())
                     && !isMeaningfulStateAdvance(current, incoming)) {
-                return current;
+                return new TransactionUpsertResult(current, TransactionUpsertResult.Action.IGNORED, current.getStatus());
             }
         }
 
+        var previousStatus = current.getStatus();
         current.setProviderEventId(incoming.getProviderEventId());
         current.setStatus(incoming.getStatus());
         current.setEventType(incoming.getEventType());
@@ -77,7 +81,10 @@ public class TransactionService {
         current.setEventOccurredAt(incoming.getEventOccurredAt());
         current.setUpdatedAt(OffsetDateTime.now());
 
-        return transactionRepository.save(current);
+        return new TransactionUpsertResult(
+                transactionRepository.save(current),
+                TransactionUpsertResult.Action.UPDATED,
+                previousStatus);
     }
 
     /**

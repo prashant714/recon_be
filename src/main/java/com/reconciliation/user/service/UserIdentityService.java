@@ -4,6 +4,9 @@ import com.reconciliation.common.enums.TransactionStatus;
 import com.reconciliation.user.entity.User;
 import com.reconciliation.user.repository.UserRepository;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -36,6 +39,8 @@ public class UserIdentityService {
 
         String normalizedEmail = normalize(email);
         String normalizedPhone = normalizePhone(phone);
+
+        lockIdentityKeys(merchantId, normalizedEmail, normalizedPhone);
 
         // 1. Try by email first
         if (normalizedEmail != null) {
@@ -124,5 +129,18 @@ public class UserIdentityService {
         if (cleaned.startsWith("0")) cleaned = "+91" + cleaned.substring(1);
         if (cleaned.length() == 10) cleaned = "+91" + cleaned;
         return cleaned;
+    }
+
+    private void lockIdentityKeys(String merchantId, String email, String phone) {
+        List<String> keys = new ArrayList<>();
+        if (StringUtils.hasText(email)) {
+            keys.add("email:" + email);
+        }
+        if (StringUtils.hasText(phone)) {
+            keys.add("phone:" + phone);
+        }
+        keys.stream()
+                .sorted(Comparator.naturalOrder())
+                .forEach(key -> userRepository.lockIdentityKey(merchantId, key));
     }
 }

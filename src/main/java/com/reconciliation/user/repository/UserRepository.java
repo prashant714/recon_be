@@ -3,6 +3,8 @@ package com.reconciliation.user.repository;
 import com.reconciliation.user.entity.User;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 @Repository
@@ -11,6 +13,14 @@ public interface UserRepository extends JpaRepository<User, Long> {
     Optional<User> findByMerchantIdAndEmail(String merchantId, String email);
 
     Optional<User> findByMerchantIdAndPhone(String merchantId, String phone);
+
+    @Query(value = """
+        SELECT pg_advisory_xact_lock(hashtext(:merchantId), hashtext(:identityKey))
+        """, nativeQuery = true)
+    Integer lockIdentityKey(
+        @Param("merchantId") String merchantId,
+        @Param("identityKey") String identityKey
+    );
 
     @org.springframework.data.jpa.repository.Modifying
     @org.springframework.data.jpa.repository.Query("""

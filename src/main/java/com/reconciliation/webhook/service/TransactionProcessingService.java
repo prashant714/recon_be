@@ -1,20 +1,16 @@
 package com.reconciliation.webhook.service;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.reconciliation.common.exception.UnsupportedWebhookEventException;
-import com.reconciliation.config.MerchantProperties;
+import com.reconciliation.paymentflow.service.PaymentFlowEventService;
 import com.reconciliation.transaction.entity.Transaction;
 import com.reconciliation.transaction.service.NormalizationService;
 import com.reconciliation.transaction.service.TransactionService;
+import com.reconciliation.transaction.service.TransactionUpsertResult;
 import com.reconciliation.user.service.UserIdentityService;
 import com.reconciliation.webhook_event.entity.WebhookEvent;
 import com.reconciliation.webhook_event.repository.WebhookEventRepository;
-import java.time.OffsetDateTime;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
@@ -33,6 +29,7 @@ public class TransactionProcessingService {
     private final TransactionService transactionService;
     private final UserIdentityService userIdentityService;
     private final WebhookEventStatusService webhookEventStatusService;
+    private final PaymentFlowEventService paymentFlowEventService;
     private final ObjectMapper objectMapper;
 
     @org.springframework.beans.factory.annotation.Value("${app.merchant.id:merchant_001}")
@@ -57,12 +54,34 @@ public class TransactionProcessingService {
             JsonNode payload = objectMapper.convertValue(
                 webhookEvent.getPayload(), JsonNode.class
             );
+            paymentFlowEventService.record(
+                    provider,
+                    webhookEvent.getProviderEventId(),
+                    extractTransactionId(payload, provider),
+                    webhookEventId,
+                    null,
+                    webhookEvent.getSource(),
+                    "PROCESSING_STARTED",
+                    "RUNNING",
+                    "Webhook event picked for processing",
+                    metadata("eventType", webhookEvent.getEventType()));
 
             Transaction transaction = route(payload, provider, webhookEvent.getEventType());
 
             if (transaction == null) {
                 log.info("Event type={} not handled — skipping id={}",
                          webhookEvent.getEventType(), webhookEventId);
+                paymentFlowEventService.record(
+                        provider,
+                        webhookEvent.getProviderEventId(),
+                        null,
+                        webhookEventId,
+                        null,
+                        webhookEvent.getSource(),
+                        "PROCESSING_SKIPPED",
+                        "IGNORED",
+                        "Event type is not handled",
+                        metadata("eventType", webhookEvent.getEventType()));
                 webhookEventStatusService.markProcessed(webhookEventId);
                 return;
             }
@@ -76,6 +95,20 @@ public class TransactionProcessingService {
                     transaction.getPayerName()
                 );
                 transaction.setUserId(userId);
+                paymentFlowEventService.record(
+                        provider,
+                        webhookEvent.getProviderEventId(),
+                        transaction.getProviderTransactionId(),
+                        webhookEventId,
+                        userId,
+                        webhookEvent.getSource(),
+                        "USER_RESOLVED",
+                        "SUCCESS",
+                        "User identity resolved for payment flow",
+                        metadata(
+                                "email", transaction.getPayerEmail(),
+                                "phone", transaction.getPayerPhone(),
+                                "payerName", transaction.getPayerName()));
             }
 
             // For refunds: link to parent payment
@@ -83,15 +116,52 @@ public class TransactionProcessingService {
                 transactionService.linkRefundToParent(transaction, payload, provider);
             }
 
-            Transaction persisted = transactionService.upsert(transaction);
+            TransactionUpsertResult upsertResult = transactionService.upsert(transaction);
+            Transaction persisted = upsertResult.transaction();
+            paymentFlowEventService.record(
+                    provider,
+                    webhookEvent.getProviderEventId(),
+                    transaction.getProviderTransactionId(),
+                    webhookEventId,
+                    persisted.getUserId(),
+                    webhookEvent.getSource(),
+                    "TRANSACTION_UPSERT",
+                    upsertResult.action().name(),
+                    "Transaction record evaluated",
+                    metadata(
+                            "previousStatus", String.valueOf(upsertResult.previousStatus()),
+                            "currentStatus", String.valueOf(persisted.getStatus()),
+                            "eventType", String.valueOf(persisted.getEventType())));
 
             // Recompute aggregates from canonical transactions so retries,
             // replays, and multi-stage provider events stay idempotent.
             if (persisted.getUserId() != null) {
                 userIdentityService.refreshAggregates(persisted.getUserId());
+                paymentFlowEventService.record(
+                        provider,
+                        webhookEvent.getProviderEventId(),
+                        transaction.getProviderTransactionId(),
+                        webhookEventId,
+                        persisted.getUserId(),
+                        webhookEvent.getSource(),
+                        "USER_AGGREGATES_REFRESHED",
+                        "SUCCESS",
+                        "User aggregates refreshed from canonical transactions",
+                        null);
             }
 
             webhookEventStatusService.markProcessed(webhookEventId);
+            paymentFlowEventService.record(
+                    provider,
+                    webhookEvent.getProviderEventId(),
+                    transaction.getProviderTransactionId(),
+                    webhookEventId,
+                    persisted.getUserId(),
+                    webhookEvent.getSource(),
+                    "PROCESSING_COMPLETED",
+                    "SUCCESS",
+                    "Webhook event fully processed",
+                    null);
             log.info("Processed event provider={} type={} txnId={}",
                      provider, webhookEvent.getEventType(),
                      transaction.getProviderTransactionId());
@@ -99,6 +169,17 @@ public class TransactionProcessingService {
         } catch (Exception e) {
             log.error("Failed to process webhook event id={}: {}", webhookEventId, e.getMessage(), e);
             webhookEventStatusService.markFailed(webhookEventId, e.getMessage());
+            paymentFlowEventService.record(
+                    provider,
+                    webhookEvent.getProviderEventId(),
+                    null,
+                    webhookEventId,
+                    null,
+                    webhookEvent.getSource(),
+                    "PROCESSING_FAILED",
+                    "FAILED",
+                    e.getMessage(),
+                    metadata("eventType", webhookEvent.getEventType()));
         }
     }
 
@@ -155,5 +236,25 @@ public class TransactionProcessingService {
                 yield null;
             }
         };
+    }
+
+    private String extractTransactionId(JsonNode payload, String provider) {
+        return switch (provider) {
+            case "razorpay" -> payload.path("payload").path("payment").path("entity").path("id")
+                    .asText(payload.path("payload").path("refund").path("entity").path("payment_id").asText(null));
+            case "stripe" -> payload.path("data").path("object").path("id").asText(null);
+            default -> null;
+        };
+    }
+
+    private Map<String, Object> metadata(Object... pairs) {
+        Map<String, Object> values = new LinkedHashMap<>();
+        for (int i = 0; i + 1 < pairs.length; i += 2) {
+            Object value = pairs[i + 1];
+            if (value != null) {
+                values.put(String.valueOf(pairs[i]), value);
+            }
+        }
+        return values.isEmpty() ? null : values;
     }
 }

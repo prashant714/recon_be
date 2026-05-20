@@ -48,4 +48,24 @@ class UserIdentityServiceTest {
         assertThat(existing.getName()).isEqualTo("Shrey Mishra");
         verify(repository).save(existing);
     }
+
+    @Test
+    void returnsExistingUserWhenCreateRacesOnUniqueEmail() {
+        when(repository.findByMerchantIdAndEmail("merchant_001", "mayank@example.com"))
+                .thenReturn(Optional.empty());
+        when(repository.findByMerchantIdAndPhone("merchant_001", "+918182800097"))
+                .thenReturn(Optional.empty());
+        when(persistenceService.createUser("merchant_001", "mayank@example.com", "+918182800097", "Mayank Gaur"))
+                .thenThrow(new org.springframework.dao.DataIntegrityViolationException("duplicate"));
+        when(persistenceService.findExistingUserId("merchant_001", "mayank@example.com", "+918182800097"))
+                .thenReturn(5L);
+
+        Long userId = service.resolveUserId(
+                "merchant_001",
+                "mayank@example.com",
+                "+918182800097",
+                "Mayank Gaur");
+
+        assertThat(userId).isEqualTo(5L);
+    }
 }
