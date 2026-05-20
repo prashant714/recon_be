@@ -13,6 +13,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
 @RequiredArgsConstructor
@@ -28,6 +30,7 @@ public class WebhookIngestionService {
      * Stores raw event, then hands off async processing.
      * Returns immediately — never blocks the webhook controller.
      */
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public void ingestAsync(byte[] rawBody, String provider, String source) {
         try {
             JsonNode payload = objectMapper.readTree(rawBody);
@@ -42,6 +45,11 @@ public class WebhookIngestionService {
 
             log.info("Received event provider={} type={} id={} source={}",
                      provider, eventType, providerEventId, source);
+
+            if (webhookEventRepository.existsByProviderAndProviderEventId(provider, providerEventId)) {
+                log.info("Duplicate event ignored provider={} id={}", provider, providerEventId);
+                return;
+            }
 
             WebhookEvent event = WebhookEvent.builder()
                     .provider(provider)

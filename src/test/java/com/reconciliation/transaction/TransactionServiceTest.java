@@ -142,4 +142,41 @@ class TransactionServiceTest {
         assertThat(existing.getReconciliationStatus()).isEqualTo(ReconciliationStatus.PENDING_SETTLEMENT);
         verify(repository).save(existing);
     }
+
+    @Test
+    void linkStripeRefundCreatedToParentCharge() throws Exception {
+        Transaction refund = Transaction.builder()
+                .provider("stripe")
+                .providerTransactionId("re_1")
+                .merchantId("merchant_001")
+                .eventType(EventType.REFUND)
+                .status(TransactionStatus.REFUNDED)
+                .presentmentAmount(100L)
+                .presentmentCurrency("USD")
+                .eventOccurredAt(OffsetDateTime.now())
+                .build();
+
+        Transaction payment = Transaction.builder()
+                .id(88L)
+                .provider("stripe")
+                .providerTransactionId("ch_1")
+                .merchantId("merchant_001")
+                .eventType(EventType.PAYMENT)
+                .status(TransactionStatus.CAPTURED)
+                .presentmentAmount(100L)
+                .presentmentCurrency("USD")
+                .eventOccurredAt(OffsetDateTime.now())
+                .build();
+
+        JsonNode payload = new ObjectMapper().readTree("""
+                {"type":"refund.created","data":{"object":{"id":"re_1","charge":"ch_1"}}}
+                """);
+
+        when(repository.findByProviderAndProviderTransactionId("stripe", "ch_1"))
+                .thenReturn(Optional.of(payment));
+
+        service.linkRefundToParent(refund, payload, "stripe");
+
+        assertThat(refund.getParentTransactionId()).isEqualTo(88L);
+    }
 }

@@ -144,4 +144,31 @@ class NormalizationServiceTest {
         assertThat(transaction.getProviderTransactionId()).isEqualTo("re_1");
         assertThat(transaction.getPresentmentCurrency()).isEqualTo("USD");
     }
+
+    @Test
+    void normalizesStripeRefundCreated() throws Exception {
+        String payload = """
+                {
+                  "id": "poll_re_1",
+                  "type": "refund.created",
+                  "created": 1710000000,
+                  "data": {
+                    "object": {
+                      "id": "re_1",
+                      "charge": "ch_1",
+                      "currency": "usd",
+                      "amount": 1200
+                    }
+                  }
+                }
+                """;
+
+        Transaction transaction = service.normalizeStripeRefundCreated(
+                objectMapper.readTree(payload), "merchant_001");
+
+        assertThat(transaction.getEventType()).isEqualTo(EventType.REFUND);
+        assertThat(transaction.getStatus()).isEqualTo(TransactionStatus.REFUNDED);
+        assertThat(transaction.getProviderTransactionId()).isEqualTo("re_1");
+        assertThat(transaction.getPresentmentCurrency()).isEqualTo("USD");
+    }
 }

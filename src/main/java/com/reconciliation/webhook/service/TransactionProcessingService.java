@@ -32,6 +32,7 @@ public class TransactionProcessingService {
     private final NormalizationService normalizationService;
     private final TransactionService transactionService;
     private final UserIdentityService userIdentityService;
+    private final WebhookEventStatusService webhookEventStatusService;
     private final ObjectMapper objectMapper;
 
     @org.springframework.beans.factory.annotation.Value("${app.merchant.id:merchant_001}")
@@ -62,7 +63,7 @@ public class TransactionProcessingService {
             if (transaction == null) {
                 log.info("Event type={} not handled — skipping id={}",
                          webhookEvent.getEventType(), webhookEventId);
-                markProcessed(webhookEvent);
+                webhookEventStatusService.markProcessed(webhookEventId);
                 return;
             }
 
@@ -90,17 +91,14 @@ public class TransactionProcessingService {
                 userIdentityService.refreshAggregates(persisted.getUserId());
             }
 
-            markProcessed(webhookEvent);
+            webhookEventStatusService.markProcessed(webhookEventId);
             log.info("Processed event provider={} type={} txnId={}",
                      provider, webhookEvent.getEventType(),
                      transaction.getProviderTransactionId());
 
         } catch (Exception e) {
             log.error("Failed to process webhook event id={}: {}", webhookEventId, e.getMessage(), e);
-            webhookEvent.setProcessed(true);
-            webhookEvent.setProcessedAt(OffsetDateTime.now());
-            webhookEvent.setProcessingError(e.getMessage());
-            webhookEventRepository.save(webhookEvent);
+            webhookEventStatusService.markFailed(webhookEventId, e.getMessage());
         }
     }
 
@@ -146,6 +144,8 @@ public class TransactionProcessingService {
                 normalizationService.normalizeStripePaymentFailed(payload, defaultMerchantId);
             case "charge.refunded" ->
                 normalizationService.normalizeStripeChargeRefunded(payload, defaultMerchantId);
+            case "refund.created" ->
+                normalizationService.normalizeStripeRefundCreated(payload, defaultMerchantId);
             case "charge.dispute.created" ->
                 normalizationService.normalizeStripeDisputeCreated(payload, defaultMerchantId);
             case "payout.paid" ->
@@ -155,11 +155,5 @@ public class TransactionProcessingService {
                 yield null;
             }
         };
-    }
-
-    private void markProcessed(WebhookEvent event) {
-        event.setProcessed(true);
-        event.setProcessedAt(OffsetDateTime.now());
-        webhookEventRepository.save(event);
     }
 }

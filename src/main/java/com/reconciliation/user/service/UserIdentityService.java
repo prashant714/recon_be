@@ -17,6 +17,7 @@ import org.springframework.util.StringUtils;
 public class UserIdentityService {
 
     private final UserRepository userRepository;
+    private final UserPersistenceService userPersistenceService;
 
     /**
      * Find or create a user by email or phone.
@@ -83,31 +84,13 @@ public class UserIdentityService {
     private Long createUser(String merchantId, String email,
                             String phone, String name) {
         try {
-            User user = User.builder()
-                    .merchantId(merchantId)
-                    .email(email)
-                    .phone(phone)
-                    .name(name)
-                    .firstSeenAt(OffsetDateTime.now())
-                    .lastSeenAt(OffsetDateTime.now())
-                    .totalTxnCount(0)
-                    .totalTxnAmount(0L)
-                    .failedTxnCount(0)
-                    .distinctPaymentMethods(0)
-                    .build();
-
-            User saved = userRepository.save(user);
-            log.info("Created new user id={} merchantId={}", saved.getId(), merchantId);
-            return saved.getId();
+            Long userId = userPersistenceService.createUser(merchantId, email, phone, name);
+            log.info("Created new user id={} merchantId={}", userId, merchantId);
+            return userId;
 
         } catch (org.springframework.dao.DataIntegrityViolationException e) {
             // Race condition: another thread created this user simultaneously
-            // Try once more to fetch
-            if (email != null) {
-                return userRepository.findByMerchantIdAndEmail(merchantId, email)
-                        .map(User::getId).orElse(null);
-            }
-            return null;
+            return userPersistenceService.findExistingUserId(merchantId, email, phone);
         }
     }
 

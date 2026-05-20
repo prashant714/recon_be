@@ -217,6 +217,29 @@ public class NormalizationService {
                 .build();
     }
 
+    public Transaction normalizeStripeRefundCreated(
+            JsonNode payload, String merchantId) {
+
+        JsonNode refund = stripeObject(payload);
+
+        return Transaction.builder()
+                .provider("stripe")
+                .providerTransactionId(refund.path("id").asText())
+                .providerEventId(payload.path("id").asText(null))
+                .merchantId(merchantId)
+                .eventType(EventType.REFUND)
+                .status(TransactionStatus.REFUNDED)
+                .presentmentAmount(refund.path("amount").asLong(0))
+                .presentmentCurrency(currency(refund.path("currency").asText("USD")))
+                .feeAmount(null)
+                .taxAmount(null)
+                .netAmount(null)
+                .eventOccurredAt(fromUnix(payload.path("created").asLong()))
+                .refundedAt(OffsetDateTime.now())
+                .reconciliationStatus(ReconciliationStatus.PENDING)
+                .build();
+    }
+
     public Transaction normalizeStripeDisputeCreated(
             JsonNode payload, String merchantId) {
 

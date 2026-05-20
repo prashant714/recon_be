@@ -1,6 +1,7 @@
 package com.reconciliation.user;
 
 import com.reconciliation.user.entity.User;
+import com.reconciliation.user.service.UserPersistenceService;
 import com.reconciliation.user.repository.UserRepository;
 import com.reconciliation.user.service.UserIdentityService;
 import java.time.OffsetDateTime;
@@ -16,7 +17,8 @@ import static org.mockito.Mockito.when;
 class UserIdentityServiceTest {
 
     private final UserRepository repository = mock(UserRepository.class);
-    private final UserIdentityService service = new UserIdentityService(repository);
+    private final UserPersistenceService persistenceService = mock(UserPersistenceService.class);
+    private final UserIdentityService service = new UserIdentityService(repository, persistenceService);
 
     @Test
     void backfillsNameWhenExistingUserMatchesByPhone() {

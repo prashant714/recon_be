@@ -107,9 +107,13 @@ public class TransactionService {
                 yield refundEntity.path("payment_id").asText(null);
             }
             case "stripe" -> {
-                // Stripe charge.refunded — the charge id IS the payment id
-                com.fasterxml.jackson.databind.JsonNode charge = payload.path("data").path("object");
-                yield charge.path("payment_intent").asText(null);
+                com.fasterxml.jackson.databind.JsonNode object = payload.path("data").path("object");
+                String eventType = payload.path("type").asText(null);
+                if ("refund.created".equals(eventType)) {
+                    yield object.path("charge").asText(null);
+                }
+                // Stripe charge.refunded parent payment is the charge id.
+                yield object.path("id").asText(null);
             }
             default -> null;
         };

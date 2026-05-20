@@ -61,15 +61,20 @@ public class RazorpayPollingService {
                 if (items == null || items.length() == 0) break;
 
                 for (int i = 0; i < items.length(); i++) {
+                    org.json.JSONObject item = items.getJSONObject(i);
+                    String eventType = eventTypeFor(entity, item);
+                    if (eventType == null) {
+                        continue;
+                    }
+
                     // Wrap each item in a synthetic webhook-like envelope
                     // so our normalization service can parse it uniformly
                     org.json.JSONObject envelope = new org.json.JSONObject();
-                    envelope.put("id",    "poll_" + entity + "_" + skip + "_" + i);
-                    envelope.put("event", entity.equals("payments")
-                                         ? "payment.captured" : "refund.processed");
+                    envelope.put("id",    syntheticEventId(entity, item));
+                    envelope.put("event", eventType);
                     envelope.put("payload", new org.json.JSONObject()
                             .put(entity.equals("payments") ? "payment" : "refund",
-                                 new org.json.JSONObject().put("entity", items.get(i))));
+                                 new org.json.JSONObject().put("entity", item)));
 
                     results.add(envelope.toString().getBytes());
                 }
@@ -117,5 +122,26 @@ public class RazorpayPollingService {
 
     private boolean hasText(String value) {
         return value != null && !value.isBlank();
+    }
+
+    private String syntheticEventId(String entity, org.json.JSONObject item) {
+        String objectId = item.optString("id", null);
+        if (hasText(objectId)) {
+            return "poll_" + entity + "_" + objectId;
+        }
+        return "poll_" + entity + "_" + java.util.UUID.randomUUID();
+    }
+
+    private String eventTypeFor(String entity, org.json.JSONObject item) {
+        if ("refunds".equals(entity)) {
+            return "refund.processed";
+        }
+        String status = item.optString("status", "");
+        return switch (status) {
+            case "captured" -> "payment.captured";
+            case "authorized" -> "payment.authorized";
+            case "failed" -> "payment.failed";
+            default -> null;
+        };
     }
 }

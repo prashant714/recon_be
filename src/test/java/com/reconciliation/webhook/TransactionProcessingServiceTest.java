@@ -9,6 +9,7 @@ import com.reconciliation.transaction.service.NormalizationService;
 import com.reconciliation.transaction.service.TransactionService;
 import com.reconciliation.user.service.UserIdentityService;
 import com.reconciliation.webhook.service.TransactionProcessingService;
+import com.reconciliation.webhook.service.WebhookEventStatusService;
 import com.reconciliation.webhook_event.entity.WebhookEvent;
 import com.reconciliation.webhook_event.repository.WebhookEventRepository;
 import java.time.OffsetDateTime;
@@ -31,12 +32,14 @@ class TransactionProcessingServiceTest {
     private final TransactionService transactionService = mock(TransactionService.class);
     private final UserIdentityService userIdentityService = mock(UserIdentityService.class);
     private final WebhookEventRepository webhookEventRepository = mock(WebhookEventRepository.class);
+    private final WebhookEventStatusService webhookEventStatusService = mock(WebhookEventStatusService.class);
 
     private final TransactionProcessingService service = new TransactionProcessingService(
             webhookEventRepository,
             normalizationService,
             transactionService,
             userIdentityService,
+            webhookEventStatusService,
             objectMapper
     );
 
@@ -82,8 +85,8 @@ class TransactionProcessingServiceTest {
 
         verify(transactionService).upsert(any(Transaction.class));
         verify(userIdentityService).refreshAggregates(10L);
-        verify(webhookEventRepository).save(any(WebhookEvent.class));
-        verify(webhookEventRepository, never()).markAsFailed(eq(1L), any(), any());
+        verify(webhookEventStatusService).markProcessed(1L);
+        verify(webhookEventRepository, never()).save(any(WebhookEvent.class));
     }
 
     @Test
@@ -102,7 +105,7 @@ class TransactionProcessingServiceTest {
 
         service.processAsync(2L, "stripe");
 
-        verify(webhookEventRepository).save(any(WebhookEvent.class));
+        verify(webhookEventStatusService).markFailed(eq(2L), any());
         verify(transactionService, never()).upsert(any(Transaction.class));
     }
 }
