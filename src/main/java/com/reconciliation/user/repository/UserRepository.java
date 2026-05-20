@@ -15,7 +15,8 @@ public interface UserRepository extends JpaRepository<User, Long> {
     Optional<User> findByMerchantIdAndPhone(String merchantId, String phone);
 
     @Query(value = """
-        SELECT pg_advisory_xact_lock(hashtext(:merchantId), hashtext(:identityKey))
+        SELECT 1
+        FROM pg_advisory_xact_lock(hashtext(:merchantId), hashtext(:identityKey))
         """, nativeQuery = true)
     Integer lockIdentityKey(
         @Param("merchantId") String merchantId,
