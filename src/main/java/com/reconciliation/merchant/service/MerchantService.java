@@ -91,6 +91,23 @@ public class MerchantService {
         return merchantRepository.save(merchant);
     }
 
+    @Transactional
+    public Map<String, String> resetApiKey(String merchantId) {
+        Merchant merchant = merchantRepository.findByMerchantId(merchantId)
+                .orElseThrow(() -> new IllegalArgumentException("Merchant not found: " + merchantId));
+
+        String rawApiKey = generateApiKey();
+        merchant.setApiKeyHash(passwordEncoder.encode(rawApiKey));
+        merchantRepository.save(merchant);
+
+        log.info("API key reset for merchant: {}", merchantId);
+        return Map.of(
+                "merchantId", merchantId,
+                "apiKey", rawApiKey,
+                "note", "Store this API key securely — it will not be shown again."
+        );
+    }
+
     private String generateApiKey() {
         byte[] bytes = new byte[32];
         new SecureRandom().nextBytes(bytes);

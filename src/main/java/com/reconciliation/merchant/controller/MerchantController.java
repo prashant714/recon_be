@@ -37,6 +37,16 @@ public class MerchantController {
         return ResponseEntity.ok(result);
     }
 
+    /** Reset API key for a merchant. Returns a new one-time API key. */
+    @PostMapping("/reset-key")
+    public ResponseEntity<Map<String, String>> resetKey(@RequestBody Map<String, String> req) {
+        String merchantId = req.get("merchantId");
+        if (merchantId == null || merchantId.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "merchantId is required"));
+        }
+        return ResponseEntity.ok(merchantService.resetApiKey(merchantId));
+    }
+
     /** Exchange merchantId + apiKey for a JWT. */
     @PostMapping("/auth")
     public ResponseEntity<Map<String, String>> auth(@Valid @RequestBody AuthRequest req) {

@@ -147,16 +147,16 @@ public class ExceptionRecordService {
 
     /**
      * Create an alert-style exception for an order that has no linked transaction yet.
-     * Uses a synthetic negative transactionId based on orderId hash to enable deduplication.
+     * Deduplicates by checking for existing open exceptions with the same type, merchant, and orderId.
      */
     @Transactional
     public ExceptionRecord createForOrderAlert(
             ExceptionType type, Severity severity, String orderId,
             Long expectedAmount, String currency, String description, String merchantId) {
 
-        // derive a stable synthetic key for deduplication: -abs(orderId.hashCode())
-        Long syntheticKey = -Math.abs((long) orderId.hashCode());
-        if (alreadyHasOpenException(syntheticKey, type)) {
+        if (exceptionRecordRepository.existsByExceptionTypeAndMerchantIdAndDescriptionContainingAndStatusIn(
+                type, merchantId, "Order " + orderId + " ",
+                List.of(ExceptionStatus.OPEN, ExceptionStatus.IN_REVIEW))) {
             log.debug("Order alert exception {} already exists for orderId {}", type, orderId);
             return null;
         }
@@ -165,7 +165,7 @@ public class ExceptionRecordService {
                 .merchantId(merchantId)
                 .exceptionType(type)
                 .severity(severity)
-                .transactionId(syntheticKey)
+                .transactionId(null)
                 .expectedAmount(expectedAmount)
                 .actualAmount(0L)
                 .discrepancyAmount(expectedAmount)

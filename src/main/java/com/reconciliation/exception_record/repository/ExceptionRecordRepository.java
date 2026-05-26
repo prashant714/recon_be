@@ -65,6 +65,12 @@ public interface ExceptionRecordRepository extends JpaRepository<ExceptionRecord
             Long settlementId,
             Collection<ExceptionStatus> statuses);
 
+    boolean existsByExceptionTypeAndMerchantIdAndDescriptionContainingAndStatusIn(
+            ExceptionType exceptionType,
+            String merchantId,
+            String descriptionFragment,
+            Collection<ExceptionStatus> statuses);
+
     @Query(value = """
         SELECT CAST(e.detected_at AS date) AS bucket,
                COUNT(*) AS exceptions
