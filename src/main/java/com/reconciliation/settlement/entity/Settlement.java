@@ -55,7 +55,7 @@ public class Settlement {
     @Column(name = "net_amount", nullable = false)
     private Long netAmount;
 
-    @Column(nullable = false, length = 3, columnDefinition = "char(3)")
+    @Column(nullable = false, length = 3)
     private String currency;
 
     @Column(name = "bank_credit_amount")

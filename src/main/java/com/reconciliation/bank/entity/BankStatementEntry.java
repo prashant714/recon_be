@@ -45,7 +45,7 @@ public class BankStatementEntry {
     @Column(nullable = false)
     private Long amount;
 
-    @Column(nullable = false, length = 3, columnDefinition = "char(3)")
+    @Column(nullable = false, length = 3)
     @Builder.Default
     private String currency = "INR";
 

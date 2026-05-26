@@ -46,7 +46,7 @@ public class Order {
     @Column(name = "expected_amount", nullable = false)
     private Long expectedAmount;
 
-    @Column(nullable = false, length = 3, columnDefinition = "char(3)")
+    @Column(nullable = false, length = 3)
     private String currency;
 
     @Enumerated(EnumType.STRING)

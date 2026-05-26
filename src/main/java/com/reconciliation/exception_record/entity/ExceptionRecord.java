@@ -60,7 +60,7 @@ public class ExceptionRecord {
     @Column(name = "discrepancy_amount")
     private Long discrepancyAmount;
 
-    @Column(length = 3, columnDefinition = "char(3)")
+    @Column(length = 3)
     private String currency;
 
     @Column(nullable = false, columnDefinition = "TEXT")

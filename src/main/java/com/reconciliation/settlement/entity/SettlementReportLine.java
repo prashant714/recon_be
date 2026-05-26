@@ -53,7 +53,7 @@ public class SettlementReportLine {
     @Column(name = "net_amount", nullable = false)
     private Long netAmount;
 
-    @Column(nullable = false, length = 3, columnDefinition = "char(3)")
+    @Column(nullable = false, length = 3)
     private String currency;
 
     @Enumerated(EnumType.STRING)
