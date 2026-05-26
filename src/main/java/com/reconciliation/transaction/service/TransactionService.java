@@ -1,5 +1,6 @@
 package com.reconciliation.transaction.service;
 
+import com.reconciliation.common.enums.ReconciliationStatus;
 import com.reconciliation.transaction.entity.Transaction;
 import com.reconciliation.transaction.repository.TransactionRepository;
 import java.time.OffsetDateTime;
@@ -71,7 +72,11 @@ public class TransactionService {
         current.setPayerPhone(firstNonBlank(current.getPayerPhone(), incoming.getPayerPhone()));
         current.setPayerName(firstNonBlank(current.getPayerName(), incoming.getPayerName()));
         current.setUserId(incoming.getUserId() != null ? incoming.getUserId() : current.getUserId());
-        current.setReconciliationStatus(incoming.getReconciliationStatus());
+        // Never downgrade reconciliationStatus — once MATCHED or EXCEPTION, a stale
+        // re-delivery of an earlier event must not silently reset progress.
+        if (reconciliationRank(incoming.getReconciliationStatus()) > reconciliationRank(current.getReconciliationStatus())) {
+            current.setReconciliationStatus(incoming.getReconciliationStatus());
+        }
         current.setMatchedAt(incoming.getMatchedAt() != null ? incoming.getMatchedAt() : current.getMatchedAt());
         current.setExceptionId(incoming.getExceptionId() != null ? incoming.getExceptionId() : current.getExceptionId());
         current.setRawPayload(incoming.getRawPayload() != null ? incoming.getRawPayload() : current.getRawPayload());
@@ -130,8 +135,10 @@ public class TransactionService {
         return incoming != null ? incoming : existing;
     }
 
+    // Preserves the existing value once set — a later event that omits a field
+    // must not silently erase data captured by an earlier event.
     private static String firstNonBlank(String current, String incoming) {
-        return StringUtils.hasText(incoming) ? incoming : current;
+        return StringUtils.hasText(current) ? current : incoming;
     }
 
     private static Map<String, Object> mergeNotes(Map<String, Object> current, Map<String, Object> incoming) {
@@ -148,6 +155,17 @@ public class TransactionService {
 
     private static boolean isMeaningfulStateAdvance(Transaction current, Transaction incoming) {
         return statusRank(incoming.getStatus()) > statusRank(current.getStatus());
+    }
+
+    private static int reconciliationRank(ReconciliationStatus status) {
+        if (status == null) return -1;
+        return switch (status) {
+            case PENDING            -> 0;
+            case PENDING_SETTLEMENT -> 1;
+            case EXCEPTION          -> 2;
+            case MATCHED            -> 3;
+            case MANUALLY_RESOLVED, IGNORED -> 4;
+        };
     }
 
     private static int statusRank(com.reconciliation.common.enums.TransactionStatus status) {

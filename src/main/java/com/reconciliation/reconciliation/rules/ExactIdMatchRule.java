@@ -10,6 +10,7 @@ import com.reconciliation.transaction.repository.TransactionRepository;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -17,6 +18,7 @@ import org.springframework.util.StringUtils;
 @Component
 @RequiredArgsConstructor
 @Slf4j
+@Order(40)
 public class ExactIdMatchRule implements ReconciliationRule {
 
     private final TransactionRepository transactionRepository;
@@ -30,9 +32,9 @@ public class ExactIdMatchRule implements ReconciliationRule {
     @Override
     @Transactional
     public void evaluate() {
-        // In this architecture, "ExactIdMatch" means we have a valid Order ID
-        // from the provider that matches our internal system.
-        // We select transactions in PENDING_SETTLEMENT state.
+        // Finds CAPTURED payments still in PENDING_SETTLEMENT after the grace window.
+        // OrderMatchingService handles real-time matching at ingestion; anything still
+        // sitting here has no pre-registered order and must be flagged for ops review.
 
         List<Transaction> candidates = transactionRepository
                 .findByStatusAndReconciliationStatusAndEventOccurredAtBefore(
@@ -42,30 +44,25 @@ public class ExactIdMatchRule implements ReconciliationRule {
                 );
 
         for (Transaction txn : candidates) {
-            if (txn.getOrderId() != null && !txn.getOrderId().isBlank()) {
-                // We have an order link — mark as MATCHED
-                txn.setReconciliationStatus(ReconciliationStatus.MATCHED);
-                txn.setMatchedAt(java.time.OffsetDateTime.now());
-                transactionRepository.save(txn);
-            } else {
-                // No order ID — cannot reconcile automatically
-                String desc = "Captured transaction has no internal Order ID reference.";
-                ExceptionRecord record = exceptionRecordService.createForTransaction(
-                        ExceptionType.UNMATCHED_PAYMENT,
-                        com.reconciliation.common.enums.Severity.MEDIUM,
-                        txn.getId(),
-                        txn.getPresentmentAmount(),
-                        null,
-                        txn.getPresentmentCurrency(),
-                        desc,
-                        txn.getMerchantId()
-                );
+            if (StringUtils.hasText(txn.getProviderOrderId())) {
+                continue;
+            }
+            String desc = "Captured payment has no order reference. Cannot reconcile automatically.";
 
-                if (record != null) {
-                    txn.setReconciliationStatus(ReconciliationStatus.EXCEPTION);
-                    txn.setExceptionId(record.getId());
-                    transactionRepository.save(txn);
-                }
+            ExceptionRecord record = exceptionRecordService.createForTransaction(
+                    ExceptionType.UNMATCHED_PAYMENT,
+                    Severity.MEDIUM,
+                    txn.getId(),
+                    txn.getPresentmentAmount(),
+                    null,
+                    txn.getPresentmentCurrency(),
+                    desc,
+                    txn.getMerchantId());
+
+            if (record != null) {
+                txn.setReconciliationStatus(ReconciliationStatus.EXCEPTION);
+                txn.setExceptionId(record.getId());
+                transactionRepository.save(txn);
             }
         }
     }

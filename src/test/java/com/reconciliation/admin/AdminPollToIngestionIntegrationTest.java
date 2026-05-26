@@ -4,8 +4,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.reconciliation.admin.service.AdminService;
 import com.reconciliation.audit.service.AuditService;
+import com.reconciliation.connection.entity.ProviderConnection;
+import com.reconciliation.connection.service.ProviderConnectionService;
 import com.reconciliation.polling.service.RazorpayPollingService;
 import com.reconciliation.polling.service.StripePollingService;
+import com.reconciliation.paymentflow.service.PaymentFlowEventService;
 import com.reconciliation.webhook.service.TransactionProcessingService;
 import com.reconciliation.webhook.service.WebhookIngestionService;
 import com.reconciliation.webhook_event.entity.WebhookEvent;
@@ -17,15 +20,12 @@ import org.mockito.ArgumentCaptor;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
-/**
- * Integration test wiring AdminService → WebhookIngestionService → (repo + processing).
- * Uses real WebhookIngestionService to verify the full poll-to-ingest chain.
- */
 class AdminPollToIngestionIntegrationTest {
 
     private WebhookEventRepository eventRepository;
@@ -33,7 +33,10 @@ class AdminPollToIngestionIntegrationTest {
     private WebhookIngestionService realIngestionService;
     private RazorpayPollingService razorpayPollingService;
     private StripePollingService stripePollingService;
+    private ProviderConnectionService providerConnectionService;
     private AdminService adminService;
+
+    private static final String MERCHANT_ID = "merchant_001";
 
     @BeforeEach
     void setUp() {
@@ -44,9 +47,10 @@ class AdminPollToIngestionIntegrationTest {
         processingService  = mock(TransactionProcessingService.class);
         razorpayPollingService = mock(RazorpayPollingService.class);
         stripePollingService   = mock(StripePollingService.class);
+        providerConnectionService = mock(ProviderConnectionService.class);
 
-        // Wire a real WebhookIngestionService so we test the full chain
-        realIngestionService = new WebhookIngestionService(eventRepository, processingService, objectMapper);
+        realIngestionService = new WebhookIngestionService(
+                eventRepository, processingService, mock(PaymentFlowEventService.class), objectMapper);
 
         adminService = new AdminService(
                 eventRepository,
@@ -54,7 +58,24 @@ class AdminPollToIngestionIntegrationTest {
                 razorpayPollingService,
                 stripePollingService,
                 realIngestionService,
-                mock(AuditService.class));
+                mock(AuditService.class),
+                providerConnectionService);
+
+        stubRazorpayConnection();
+    }
+
+    private void stubRazorpayConnection() {
+        ProviderConnection conn = ProviderConnection.builder()
+                .merchantId(MERCHANT_ID)
+                .provider("razorpay")
+                .apiKeyEncrypted("enc_key")
+                .secretEncrypted("enc_secret")
+                .apiKeyMasked("rzp_****1234")
+                .build();
+        when(providerConnectionService.findActiveConnection(MERCHANT_ID, "razorpay"))
+                .thenReturn(Optional.of(conn));
+        when(providerConnectionService.decryptApiKey(conn)).thenReturn("rzp_key");
+        when(providerConnectionService.decryptSecret(conn)).thenReturn("rzp_secret");
     }
 
     @Test
@@ -67,26 +88,26 @@ class AdminPollToIngestionIntegrationTest {
                  "payload":{"payment":{"entity":{"id":"pay_001"}}}}
                 """.getBytes();
 
-        when(razorpayPollingService.fetchPayments(from, to)).thenReturn(List.of(payload));
-        when(razorpayPollingService.fetchRefunds(from, to)).thenReturn(List.of());
+        when(razorpayPollingService.fetchPayments("rzp_key", "rzp_secret", from, to))
+                .thenReturn(List.of(payload));
+        when(razorpayPollingService.fetchRefunds("rzp_key", "rzp_secret", from, to))
+                .thenReturn(List.of());
 
         WebhookEvent saved = WebhookEvent.builder().id(42L).build();
         when(eventRepository.save(any(WebhookEvent.class))).thenReturn(saved);
 
-        Map<String, Object> result = adminService.poll("razorpay", from, to, "admin", "127.0.0.1");
+        Map<String, Object> result = adminService.poll("razorpay", from, to, MERCHANT_ID, "admin", "127.0.0.1");
 
-        // Event was saved to the repository
         ArgumentCaptor<WebhookEvent> captor = ArgumentCaptor.forClass(WebhookEvent.class);
         verify(eventRepository).save(captor.capture());
         WebhookEvent captured = captor.getValue();
         assertThat(captured.getProvider()).isEqualTo("razorpay");
         assertThat(captured.getSource()).isEqualTo("admin-poll");
+        assertThat(captured.getMerchantId()).isEqualTo(MERCHANT_ID);
         assertThat(captured.getEventType()).isEqualTo("payment.captured");
         assertThat(captured.isProcessed()).isFalse();
 
-        // Processing was queued
         verify(processingService).processAsync(42L, "razorpay");
-
         assertThat(result.get("fetched")).isEqualTo(1);
     }
 
@@ -100,16 +121,16 @@ class AdminPollToIngestionIntegrationTest {
                  "payload":{"payment":{"entity":{"id":"pay_dup"}}}}
                 """.getBytes();
 
-        when(razorpayPollingService.fetchPayments(from, to)).thenReturn(List.of(payload));
-        when(razorpayPollingService.fetchRefunds(from, to)).thenReturn(List.of());
+        when(razorpayPollingService.fetchPayments("rzp_key", "rzp_secret", from, to))
+                .thenReturn(List.of(payload));
+        when(razorpayPollingService.fetchRefunds("rzp_key", "rzp_secret", from, to))
+                .thenReturn(List.of());
 
-        // Simulate unique constraint violation (duplicate event already in DB)
         when(eventRepository.save(any(WebhookEvent.class)))
                 .thenThrow(new org.springframework.dao.DataIntegrityViolationException("duplicate"));
 
-        adminService.poll("razorpay", from, to, "admin", "127.0.0.1");
+        adminService.poll("razorpay", from, to, MERCHANT_ID, "admin", "127.0.0.1");
 
-        // Duplicate was silently ignored — processing must not be triggered
         verify(processingService, never()).processAsync(any(), any());
     }
 
@@ -117,6 +138,7 @@ class AdminPollToIngestionIntegrationTest {
     void stripePollIngestionUsesCorrectProvider() {
         OffsetDateTime from = OffsetDateTime.now().minusHours(1);
         OffsetDateTime to   = OffsetDateTime.now();
+        String merchantId = "merchant_stripe";
 
         byte[] payload = """
                 {"id":"poll_ch_abc","type":"charge.succeeded",
@@ -129,12 +151,13 @@ class AdminPollToIngestionIntegrationTest {
         WebhookEvent saved = WebhookEvent.builder().id(55L).build();
         when(eventRepository.save(any(WebhookEvent.class))).thenReturn(saved);
 
-        adminService.poll("stripe", from, to, "admin", "127.0.0.1");
+        adminService.poll("stripe", from, to, merchantId, "admin", "127.0.0.1");
 
         ArgumentCaptor<WebhookEvent> captor = ArgumentCaptor.forClass(WebhookEvent.class);
         verify(eventRepository).save(captor.capture());
         assertThat(captor.getValue().getProvider()).isEqualTo("stripe");
         assertThat(captor.getValue().getSource()).isEqualTo("admin-poll");
+        assertThat(captor.getValue().getMerchantId()).isEqualTo(merchantId);
 
         verify(processingService).processAsync(55L, "stripe");
     }
@@ -147,8 +170,10 @@ class AdminPollToIngestionIntegrationTest {
         byte[] p1 = "{\"id\":\"evt_1\",\"event\":\"payment.captured\",\"payload\":{\"payment\":{\"entity\":{\"id\":\"pay_1\"}}}}".getBytes();
         byte[] p2 = "{\"id\":\"evt_2\",\"event\":\"payment.captured\",\"payload\":{\"payment\":{\"entity\":{\"id\":\"pay_2\"}}}}".getBytes();
 
-        when(razorpayPollingService.fetchPayments(from, to)).thenReturn(List.of(p1, p2));
-        when(razorpayPollingService.fetchRefunds(from, to)).thenReturn(List.of());
+        when(razorpayPollingService.fetchPayments("rzp_key", "rzp_secret", from, to))
+                .thenReturn(List.of(p1, p2));
+        when(razorpayPollingService.fetchRefunds("rzp_key", "rzp_secret", from, to))
+                .thenReturn(List.of());
 
         when(eventRepository.save(any(WebhookEvent.class))).thenAnswer(inv -> {
             WebhookEvent e = inv.getArgument(0);
@@ -156,7 +181,7 @@ class AdminPollToIngestionIntegrationTest {
             return e;
         });
 
-        Map<String, Object> result = adminService.poll("razorpay", from, to, "admin", "127.0.0.1");
+        Map<String, Object> result = adminService.poll("razorpay", from, to, MERCHANT_ID, "admin", "127.0.0.1");
 
         verify(eventRepository, times(2)).save(any(WebhookEvent.class));
         verify(processingService, times(2)).processAsync(any(), eq("razorpay"));

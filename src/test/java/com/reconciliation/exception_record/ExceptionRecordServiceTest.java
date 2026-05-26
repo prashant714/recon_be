@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -60,5 +61,35 @@ class ExceptionRecordServiceTest {
 
         assertThat(result).isNull();
         verify(repository, never()).save(any(ExceptionRecord.class));
+    }
+
+    @Test
+    void orderAlertStoresSyntheticTransactionIdForDeduplication() {
+        when(repository.save(any(ExceptionRecord.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        ExceptionRecord record = service.createForOrderAlert(
+                ExceptionType.MISSING_CAPTURE,
+                Severity.HIGH,
+                "ord_001",
+                100L,
+                "INR",
+                "desc",
+                "merchant_001");
+
+        Long syntheticKey = -Math.abs((long) "ord_001".hashCode());
+        assertThat(record.getTransactionId()).isEqualTo(syntheticKey);
+        verify(repository).save(argThat(saved -> syntheticKey.equals(saved.getTransactionId())));
+    }
+
+    @Test
+    void detectsActiveSettlementExceptionByTypeAndSettlementId() {
+        when(repository.existsByExceptionTypeAndSettlementIdAndStatusIn(
+                ExceptionType.OVERDUE_BANK_CREDIT,
+                99L,
+                List.of(ExceptionStatus.OPEN, ExceptionStatus.IN_REVIEW)))
+                .thenReturn(true);
+
+        assertThat(service.alreadyExistsForSettlement(
+                ExceptionType.OVERDUE_BANK_CREDIT, 99L)).isTrue();
     }
 }

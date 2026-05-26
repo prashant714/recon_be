@@ -1,80 +1,132 @@
 package com.reconciliation.polling.service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.razorpay.Entity;
 import com.razorpay.RazorpayClient;
-import lombok.RequiredArgsConstructor;
+import com.razorpay.RazorpayException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @Service
-@RequiredArgsConstructor
 @Slf4j
 public class RazorpayPollingService {
 
-    private final RazorpayClient razorpayClient;
-    private final ObjectMapper objectMapper;
-
     @Value("${app.razorpay.key-id:}")
-    private String keyId;
+    private String defaultKeyId;
 
     @Value("${app.razorpay.key-secret:}")
-    private String keySecret;
+    private String defaultKeySecret;
 
     private static final int PAGE_SIZE = 100;
     private static final int MAX_RETRIES = 3;
     private static final long RETRY_DELAY_MS = 1000;
 
-    public List<byte[]> fetchPayments(OffsetDateTime from, OffsetDateTime to) {
+    public List<byte[]> fetchPayments(String keyId, String keySecret, OffsetDateTime from, OffsetDateTime to) {
         log.debug("Polling Razorpay payments from={} to={}", from, to);
-        return fetchPaginated("payments", from, to);
+        return fetchPaginated(keyId, keySecret, "payments", from, to);
+    }
+
+    public List<byte[]> fetchRefunds(String keyId, String keySecret, OffsetDateTime from, OffsetDateTime to) {
+        log.debug("Polling Razorpay refunds from={} to={}", from, to);
+        return fetchPaginated(keyId, keySecret, "refunds", from, to);
+    }
+
+    public List<byte[]> fetchPayments(OffsetDateTime from, OffsetDateTime to) {
+        return fetchPayments(defaultKeyId, defaultKeySecret, from, to);
     }
 
     public List<byte[]> fetchRefunds(OffsetDateTime from, OffsetDateTime to) {
-        log.debug("Polling Razorpay refunds from={} to={}", from, to);
-        return fetchPaginated("refunds", from, to);
+        return fetchRefunds(defaultKeyId, defaultKeySecret, from, to);
     }
 
-    private List<byte[]> fetchPaginated(String entity, OffsetDateTime from, OffsetDateTime to) {
+    public List<Map<String, Object>> fetchPaymentsBySettlementId(String keyId, String keySecret, String settlementId) {
+        List<Map<String, Object>> lines = new ArrayList<>();
+        RazorpayClient client = createClient(keyId, keySecret);
+        if (client == null) {
+            log.info("Skipping settlement report fetch — invalid Razorpay credentials");
+            return lines;
+        }
+
+        int skip = 0;
+        while (true) {
+            try {
+                org.json.JSONObject options = new org.json.JSONObject();
+                options.put("settlement_id", settlementId);
+                options.put("count", PAGE_SIZE);
+                options.put("skip", skip);
+
+                List<? extends Entity> payments = client.payments.fetchAll(options);
+                if (payments == null || payments.isEmpty()) break;
+
+                for (Entity p : payments) {
+                    org.json.JSONObject item = p.toJson();
+                    long amount = item.optLong("amount", 0L);
+                    long fee = item.optLong("fee", 0L);
+                    long tax = item.optLong("tax", 0L);
+                    long net = amount - fee - tax;
+
+                    Map<String, Object> line = new LinkedHashMap<>();
+                    line.put("providerTxnId", item.optString("id"));
+                    line.put("entityType", "payment");
+                    line.put("grossAmount", amount);
+                    line.put("feeAmount", fee + tax);
+                    line.put("netAmount", net);
+                    line.put("currency", item.optString("currency", "INR").toUpperCase());
+                    lines.add(line);
+                }
+
+                if (payments.size() < PAGE_SIZE) break;
+                skip += PAGE_SIZE;
+
+            } catch (Exception e) {
+                log.error("Failed to fetch settlement report for settlementId={}: {}", settlementId, e.getMessage());
+                break;
+            }
+        }
+        return lines;
+    }
+
+    public List<Map<String, Object>> fetchPaymentsBySettlementId(String settlementId) {
+        return fetchPaymentsBySettlementId(defaultKeyId, defaultKeySecret, settlementId);
+    }
+
+    private List<byte[]> fetchPaginated(String keyId, String keySecret, String entity, OffsetDateTime from, OffsetDateTime to) {
         List<byte[]> results = new ArrayList<>();
-        if (!hasUsableCredentials()) {
-            log.info("Skipping Razorpay {} polling because real API credentials are not configured", entity);
+        RazorpayClient client = createClient(keyId, keySecret);
+        if (client == null) {
+            log.info("Skipping Razorpay {} polling — invalid credentials", entity);
             return results;
         }
 
         int skip = 0;
-
         while (true) {
             try {
                 org.json.JSONObject options = new org.json.JSONObject();
-                options.put("from",  from.toEpochSecond());
-                options.put("to",    to.toEpochSecond());
+                options.put("from", from.toEpochSecond());
+                options.put("to", to.toEpochSecond());
                 options.put("count", PAGE_SIZE);
-                options.put("skip",  skip);
+                options.put("skip", skip);
 
-                org.json.JSONArray items = fetchWithRetry(entity, options);
+                org.json.JSONArray items = fetchWithRetry(client, entity, options);
 
                 if (items == null || items.length() == 0) break;
 
                 for (int i = 0; i < items.length(); i++) {
                     org.json.JSONObject item = items.getJSONObject(i);
                     String eventType = eventTypeFor(entity, item);
-                    if (eventType == null) {
-                        continue;
-                    }
+                    if (eventType == null) continue;
 
-                    // Wrap each item in a synthetic webhook-like envelope
-                    // so our normalization service can parse it uniformly
                     org.json.JSONObject envelope = new org.json.JSONObject();
-                    envelope.put("id",    syntheticEventId(entity, item));
+                    envelope.put("id", syntheticEventId(entity, item));
                     envelope.put("event", eventType);
                     envelope.put("payload", new org.json.JSONObject()
                             .put(entity.equals("payments") ? "payment" : "refund",
-                                 new org.json.JSONObject().put("entity", item)));
+                                    new org.json.JSONObject().put("entity", item)));
 
                     results.add(envelope.toString().getBytes());
                 }
@@ -91,12 +143,25 @@ public class RazorpayPollingService {
         return results;
     }
 
-    private org.json.JSONArray fetchWithRetry(String entity, org.json.JSONObject options) {
+    private RazorpayClient createClient(String keyId, String keySecret) {
+        if (!hasText(keyId) || !hasText(keySecret)
+                || keyId.contains("placeholder") || keySecret.contains("placeholder")) {
+            return null;
+        }
+        try {
+            return new RazorpayClient(keyId, keySecret);
+        } catch (RazorpayException e) {
+            log.error("Failed to create RazorpayClient: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private org.json.JSONArray fetchWithRetry(RazorpayClient client, String entity, org.json.JSONObject options) {
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             try {
                 List<? extends Entity> items = "payments".equals(entity)
-                        ? razorpayClient.payments.fetchAll(options)
-                        : razorpayClient.refunds.fetchAll(options);
+                        ? client.payments.fetchAll(options)
+                        : client.refunds.fetchAll(options);
 
                 org.json.JSONArray jsonArray = new org.json.JSONArray();
                 for (Entity item : items) {
@@ -111,13 +176,6 @@ public class RazorpayPollingService {
             }
         }
         return null;
-    }
-
-    private boolean hasUsableCredentials() {
-        return hasText(keyId)
-                && hasText(keySecret)
-                && !keyId.contains("placeholder")
-                && !keySecret.contains("placeholder");
     }
 
     private boolean hasText(String value) {

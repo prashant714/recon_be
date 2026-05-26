@@ -41,7 +41,8 @@ class NormalizationServiceTest {
         assertThat(transaction.getEventType()).isEqualTo(EventType.PAYMENT);
         assertThat(transaction.getStatus()).isEqualTo(TransactionStatus.AUTHORIZED);
         assertThat(transaction.getPresentmentCurrency()).isEqualTo("INR");
-        assertThat(transaction.getOrderId()).isEqualTo("order_1");
+        assertThat(transaction.getOrderId()).isNull();
+        assertThat(transaction.getProviderOrderId()).isEqualTo("order_1");
     }
 
     @Test

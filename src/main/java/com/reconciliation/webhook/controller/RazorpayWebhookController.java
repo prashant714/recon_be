@@ -4,6 +4,7 @@ import com.reconciliation.webhook.service.RazorpaySignatureService;
 import com.reconciliation.webhook.service.WebhookIngestionService;
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
+import java.util.Optional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
@@ -28,12 +29,13 @@ public class RazorpayWebhookController {
             throws IOException {
         byte[] rawBody = request.getInputStream().readAllBytes();
 
-        if (signature == null || !signatureService.verify(rawBody, signature)) {
+        Optional<String> merchantId = signatureService.resolveMerchantId(rawBody, signature);
+        if (merchantId.isEmpty()) {
             log.warn("Razorpay signature verification failed from IP: {}", request.getRemoteAddr());
             return ResponseEntity.badRequest().body("Invalid signature");
         }
 
-        ingestionService.ingestAsync(rawBody, "razorpay", "webhook");
+        ingestionService.ingestAsync(rawBody, "razorpay", "webhook", merchantId.get());
         return ResponseEntity.ok("received");
     }
 }

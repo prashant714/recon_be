@@ -1,6 +1,7 @@
 package com.reconciliation.webhook;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.reconciliation.paymentflow.service.PaymentFlowEventService;
 import com.reconciliation.webhook.service.TransactionProcessingService;
 import com.reconciliation.webhook.service.WebhookIngestionService;
 import com.reconciliation.webhook_event.entity.WebhookEvent;
@@ -21,8 +22,9 @@ class WebhookIngestionServiceTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final WebhookEventRepository repository = mock(WebhookEventRepository.class);
     private final TransactionProcessingService processingService = mock(TransactionProcessingService.class);
+    private final PaymentFlowEventService paymentFlowEventService = mock(PaymentFlowEventService.class);
     private final WebhookIngestionService service =
-            new WebhookIngestionService(repository, processingService, objectMapper);
+            new WebhookIngestionService(repository, processingService, paymentFlowEventService, objectMapper);
 
     @Test
     void savesNewEventAndQueuesAsyncProcessing() {
@@ -44,6 +46,26 @@ class WebhookIngestionServiceTest {
         assertThat(captor.getValue().getProvider()).isEqualTo("razorpay");
         assertThat(captor.getValue().getProviderEventId()).isEqualTo("evt_123");
         verify(processingService).processAsync(55L, "razorpay");
+    }
+
+    @Test
+    void storesResolvedMerchantIdWhenProvided() {
+        String payload = """
+                {"id":"evt_merchant","event":"payment.captured","payload":{"payment":{"entity":{"id":"pay_123"}}}}
+                """;
+
+        when(repository.save(any(WebhookEvent.class))).thenAnswer(invocation -> {
+            WebhookEvent event = invocation.getArgument(0);
+            event.setId(57L);
+            return event;
+        });
+
+        service.ingestAsync(payload.getBytes(), "razorpay", "webhook", "merchant_live");
+
+        ArgumentCaptor<WebhookEvent> captor = ArgumentCaptor.forClass(WebhookEvent.class);
+        verify(repository).save(captor.capture());
+        assertThat(captor.getValue().getMerchantId()).isEqualTo("merchant_live");
+        verify(processingService).processAsync(57L, "razorpay");
     }
 
     @Test

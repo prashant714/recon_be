@@ -32,6 +32,11 @@ public class WebhookIngestionService {
      */
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public void ingestAsync(byte[] rawBody, String provider, String source) {
+        ingestAsync(rawBody, provider, source, null);
+    }
+
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    public void ingestAsync(byte[] rawBody, String provider, String source, String merchantId) {
         try {
             JsonNode payload = objectMapper.readTree(rawBody);
 
@@ -76,6 +81,7 @@ public class WebhookIngestionService {
             WebhookEvent event = WebhookEvent.builder()
                     .provider(provider)
                     .providerEventId(providerEventId)
+                    .merchantId(merchantId)
                     .eventType(eventType)
                     .receivedAt(OffsetDateTime.now())
                     .payload(objectMapper.convertValue(payload, Map.class))

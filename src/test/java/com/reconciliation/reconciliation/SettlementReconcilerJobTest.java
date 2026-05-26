@@ -44,6 +44,8 @@ class SettlementReconcilerJobTest {
     @Test
     void settledSettlementWithNoOpenExceptionsIsClosedAsMatchedToBank() {
         Settlement s = settlement(1L, "setl_001", SettlementStatus.SETTLED);
+        s.setBankCreditAmount(98000L);
+        s.setBankCreditDate(java.time.LocalDate.now());
         when(settlementRepository.findBySettlementStatus(SettlementStatus.SETTLED)).thenReturn(List.of(s));
         when(exceptionRecordRepository.existsBySettlementIdAndStatusIn(eq(1L), anyCollection())).thenReturn(false);
         when(settlementRepository.findBySettlementStatusAndCreatedAtBefore(eq(SettlementStatus.PENDING), any()))
@@ -71,6 +73,21 @@ class SettlementReconcilerJobTest {
         verify(settlementRepository, never()).save(s);
         assertThat(result.get("closedAsMatched")).isEqualTo(0);
         assertThat(result.get("remainedDiscrepant")).isEqualTo(1);
+    }
+
+    @Test
+    void settledSettlementWithoutBankCreditIsNotClosedAsMatchedToBank() {
+        Settlement s = settlement(8L, "setl_NO_BANK", SettlementStatus.SETTLED);
+        when(settlementRepository.findBySettlementStatus(SettlementStatus.SETTLED)).thenReturn(List.of(s));
+        when(exceptionRecordRepository.existsBySettlementIdAndStatusIn(eq(8L), anyCollection())).thenReturn(false);
+        when(settlementRepository.findBySettlementStatusAndCreatedAtBefore(eq(SettlementStatus.PENDING), any()))
+                .thenReturn(List.of());
+
+        Map<String, Object> result = job.run("admin", "127.0.0.1");
+
+        assertThat(s.getSettlementStatus()).isEqualTo(SettlementStatus.SETTLED);
+        verify(settlementRepository, never()).save(s);
+        assertThat(result.get("closedAsMatched")).isEqualTo(0);
     }
 
     @Test
@@ -114,6 +131,8 @@ class SettlementReconcilerJobTest {
         Settlement matched   = settlement(5L, "setl_005", SettlementStatus.SETTLED);
         Settlement discrepant = settlement(6L, "setl_006", SettlementStatus.SETTLED);
         Settlement overdue   = settlement(7L, "setl_007", SettlementStatus.PENDING);
+        matched.setBankCreditAmount(98000L);
+        matched.setBankCreditDate(java.time.LocalDate.now());
 
         when(settlementRepository.findBySettlementStatus(SettlementStatus.SETTLED))
                 .thenReturn(List.of(matched, discrepant));

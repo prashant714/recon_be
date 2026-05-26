@@ -1,11 +1,13 @@
 package com.reconciliation.admin.controller;
 
 import com.reconciliation.admin.service.AdminService;
+import com.reconciliation.admin.service.SelectedTransactionReconciliationService;
 import com.reconciliation.audit.service.AuditService;
 import com.reconciliation.paymentflow.service.PaymentFlowEventService;
 import com.reconciliation.reconciliation.job.SettlementReconcilerJob;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import org.springframework.format.annotation.DateTimeFormat;
@@ -26,6 +28,7 @@ public class AdminController {
     private final AuditService auditService;
     private final PaymentFlowEventService paymentFlowEventService;
     private final SettlementReconcilerJob settlementReconcilerJob;
+    private final SelectedTransactionReconciliationService selectedTransactionReconciliationService;
 
     @PostMapping("/poll")
     public Map<String, Object> poll(
@@ -33,7 +36,7 @@ public class AdminController {
             @RequestHeader(value = "X-Actor", defaultValue = "local-admin") String actor,
             HttpServletRequest httpRequest) {
         return adminService.poll(request.provider(), request.from(), request.to(),
-                actor, httpRequest.getRemoteAddr());
+                request.merchantId(), actor, httpRequest.getRemoteAddr());
     }
 
     @PostMapping("/replay")
@@ -49,6 +52,18 @@ public class AdminController {
             @RequestHeader(value = "X-Actor", defaultValue = "local-admin") String actor,
             HttpServletRequest httpRequest) {
         return settlementReconcilerJob.run(actor, httpRequest.getRemoteAddr());
+    }
+
+    @PostMapping("/reconcile-transactions")
+    public Map<String, Object> reconcileTransactions(
+            @RequestBody ReconcileTransactionsRequest request,
+            @RequestHeader(value = "X-Actor", defaultValue = "frontend-admin") String actor,
+            HttpServletRequest httpRequest) {
+        Map<String, Object> result = selectedTransactionReconciliationService
+                .reconcile(request.transactionIds(), request.mode());
+        auditService.log(actor, "transactions_reconciled", "transaction", null, null,
+                result, httpRequest.getRemoteAddr());
+        return result;
     }
 
     @GetMapping("/audit-logs")
@@ -71,7 +86,10 @@ public class AdminController {
     public record PollRequest(
             String provider,
             @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime from,
-            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime to) {}
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime to,
+            String merchantId) {}
 
     public record ReplayRequest(Long webhookEventId) {}
+
+    public record ReconcileTransactionsRequest(List<Long> transactionIds, String mode) {}
 }

@@ -3,6 +3,7 @@ package com.reconciliation.webhook;
 import com.reconciliation.webhook.controller.RazorpayWebhookController;
 import com.reconciliation.webhook.controller.StripeWebhookController;
 import com.reconciliation.config.JwtConfig;
+import com.reconciliation.merchant.repository.MerchantRepository;
 import com.reconciliation.webhook.service.RazorpaySignatureService;
 import com.reconciliation.webhook.service.StripeSignatureService;
 import com.reconciliation.webhook.service.WebhookIngestionService;
@@ -12,8 +13,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.HexFormat;
+import java.util.List;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -28,6 +31,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -52,6 +56,14 @@ class WebhookControllerTest {
     @MockBean
     private JwtConfig jwtConfig;
 
+    @MockBean
+    private MerchantRepository merchantRepository;
+
+    @BeforeEach
+    void setUp() {
+        when(merchantRepository.findByStatus("ACTIVE")).thenReturn(List.of());
+    }
+
     @Test
     void acceptsRazorpayFixtureWithValidSignature() throws Exception {
         byte[] body = fixtureBytes("razorpay/payment.captured.json");
@@ -63,7 +75,8 @@ class WebhookControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(content().string("received"));
 
-        verify(webhookIngestionService).ingestAsync(any(byte[].class), eq("razorpay"), eq("webhook"));
+        verify(webhookIngestionService).ingestAsync(
+                any(byte[].class), eq("razorpay"), eq("webhook"), eq("merchant_001"));
     }
 
     @Test
@@ -77,7 +90,7 @@ class WebhookControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(content().string("Invalid signature"));
 
-        verify(webhookIngestionService, never()).ingestAsync(any(byte[].class), any(), any());
+        verify(webhookIngestionService, never()).ingestAsync(any(byte[].class), any(), any(), any());
     }
 
     @Test

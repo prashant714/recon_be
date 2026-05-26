@@ -21,6 +21,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -46,6 +47,27 @@ class RuleBehaviorTest {
         assertThat(tx.getReconciliationStatus()).isEqualTo(ReconciliationStatus.EXCEPTION);
         assertThat(tx.getExceptionId()).isEqualTo(77L);
         verify(repository).save(tx);
+    }
+
+    @Test
+    void exactIdMatchLeavesProviderOrderPaymentsForUnmatchedOrderRule() {
+        TransactionRepository repository = mock(TransactionRepository.class);
+        ExceptionRecordService exceptionRecordService = mock(ExceptionRecordService.class);
+        ExactIdMatchRule rule = new ExactIdMatchRule(repository, exceptionRecordService);
+
+        Transaction tx = payment(11L, null);
+        tx.setProviderOrderId("order_abc123");
+        when(repository.findByStatusAndReconciliationStatusAndEventOccurredAtBefore(
+                eq(TransactionStatus.CAPTURED),
+                eq(ReconciliationStatus.PENDING_SETTLEMENT),
+                any()))
+                .thenReturn(List.of(tx));
+
+        rule.evaluate();
+
+        assertThat(tx.getReconciliationStatus()).isEqualTo(ReconciliationStatus.PENDING_SETTLEMENT);
+        verify(exceptionRecordService, never()).createForTransaction(any(), any(), any(), any(), any(), any(), any(), any());
+        verify(repository, never()).save(tx);
     }
 
     @Test

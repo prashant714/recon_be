@@ -36,6 +36,9 @@ public class WebhookEvent {
     @Column(name = "provider_event_id", nullable = false, length = 120)
     private String providerEventId;
 
+    @Column(name = "merchant_id", length = 60)
+    private String merchantId;
+
     @Column(name = "event_type", nullable = false, length = 100)
     private String eventType;
 

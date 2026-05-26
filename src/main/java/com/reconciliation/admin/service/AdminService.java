@@ -1,6 +1,8 @@
 package com.reconciliation.admin.service;
 
 import com.reconciliation.audit.service.AuditService;
+import com.reconciliation.connection.entity.ProviderConnection;
+import com.reconciliation.connection.service.ProviderConnectionService;
 import com.reconciliation.polling.service.RazorpayPollingService;
 import com.reconciliation.polling.service.StripePollingService;
 import com.reconciliation.webhook.service.TransactionProcessingService;
@@ -26,6 +28,7 @@ public class AdminService {
     private final StripePollingService stripePollingService;
     private final WebhookIngestionService webhookIngestionService;
     private final AuditService auditService;
+    private final ProviderConnectionService providerConnectionService;
 
     @Transactional
     public Map<String, Object> replay(Long webhookEventId, String actor, String ipAddress) {
@@ -44,21 +47,33 @@ public class AdminService {
     }
 
     public Map<String, Object> poll(String provider, OffsetDateTime from, OffsetDateTime to,
-                                    String actor, String ipAddress) {
+                                    String merchantId, String actor, String ipAddress) {
+        if (merchantId == null || merchantId.isBlank()) {
+            throw new IllegalArgumentException("merchantId is required for polling — credentials are per-merchant");
+        }
+
         int fetched = switch (provider.toLowerCase()) {
             case "razorpay" -> {
-                List<byte[]> payments = razorpayPollingService.fetchPayments(from, to);
-                List<byte[]> refunds  = razorpayPollingService.fetchRefunds(from, to);
+                ProviderConnection conn = providerConnectionService
+                        .findActiveConnection(merchantId, "razorpay")
+                        .orElseThrow(() -> new IllegalArgumentException(
+                                "No active Razorpay connection for merchant: " + merchantId));
+
+                String keyId = providerConnectionService.decryptApiKey(conn);
+                String keySecret = providerConnectionService.decryptSecret(conn);
+
+                List<byte[]> payments = razorpayPollingService.fetchPayments(keyId, keySecret, from, to);
+                List<byte[]> refunds  = razorpayPollingService.fetchRefunds(keyId, keySecret, from, to);
                 int count = 0;
                 for (byte[] payload : payments) {
-                    webhookIngestionService.ingestAsync(payload, "razorpay", "admin-poll");
+                    webhookIngestionService.ingestAsync(payload, "razorpay", "admin-poll", merchantId);
                     count++;
                 }
                 for (byte[] payload : refunds) {
-                    webhookIngestionService.ingestAsync(payload, "razorpay", "admin-poll");
+                    webhookIngestionService.ingestAsync(payload, "razorpay", "admin-poll", merchantId);
                     count++;
                 }
-                log.info("Admin poll Razorpay: {} events fetched from={} to={}", count, from, to);
+                log.info("Admin poll Razorpay: {} events fetched for merchant={} from={} to={}", count, merchantId, from, to);
                 yield count;
             }
             case "stripe" -> {
@@ -66,24 +81,25 @@ public class AdminService {
                 List<byte[]> refunds = stripePollingService.fetchRefunds(from, to);
                 int count = 0;
                 for (byte[] payload : charges) {
-                    webhookIngestionService.ingestAsync(payload, "stripe", "admin-poll");
+                    webhookIngestionService.ingestAsync(payload, "stripe", "admin-poll", merchantId);
                     count++;
                 }
                 for (byte[] payload : refunds) {
-                    webhookIngestionService.ingestAsync(payload, "stripe", "admin-poll");
+                    webhookIngestionService.ingestAsync(payload, "stripe", "admin-poll", merchantId);
                     count++;
                 }
-                log.info("Admin poll Stripe: {} events fetched from={} to={}", count, from, to);
+                log.info("Admin poll Stripe: {} events fetched for merchant={} from={} to={}", count, merchantId, from, to);
                 yield count;
             }
             default -> throw new IllegalArgumentException("Unsupported provider: " + provider);
         };
 
         auditService.log(actor, "admin_poll_triggered", "provider", null, null,
-                Map.of("provider", provider, "from", from.toString(), "to", to.toString(), "fetched", fetched),
+                Map.of("provider", provider, "merchantId", merchantId,
+                        "from", from.toString(), "to", to.toString(), "fetched", fetched),
                 ipAddress);
 
-        return Map.of("status", "accepted", "provider", provider,
+        return Map.of("status", "accepted", "provider", provider, "merchantId", merchantId,
                 "from", from, "to", to, "fetched", fetched);
     }
 }

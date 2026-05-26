@@ -281,7 +281,7 @@ public class NormalizationService {
                 .providerTransactionId(p.path("id").asText())
                 .providerEventId(payload.path("id").asText(null))
                 .merchantId(merchantId)
-                .orderId(p.path("order_id").asText(null))
+                .orderId(null)
                 .providerOrderId(p.path("order_id").asText(null))
                 .presentmentAmount(p.path("amount").asLong(0))
                 .presentmentCurrency(currency(p.path("currency").asText("INR")))
@@ -321,7 +321,10 @@ public class NormalizationService {
     }
 
     private OffsetDateTime fromUnix(long epochSeconds) {
-        if (epochSeconds == 0) return OffsetDateTime.now();
+        if (epochSeconds == 0) {
+            log.warn("Received event with missing/zero timestamp — using current time as fallback");
+            return OffsetDateTime.now();
+        }
         return OffsetDateTime.ofInstant(
             java.time.Instant.ofEpochSecond(epochSeconds), java.time.ZoneOffset.UTC
         );

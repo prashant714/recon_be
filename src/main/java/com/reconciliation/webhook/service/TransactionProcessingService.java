@@ -2,7 +2,10 @@ package com.reconciliation.webhook.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.reconciliation.order.service.OrderMatchingService;
 import com.reconciliation.paymentflow.service.PaymentFlowEventService;
+import com.reconciliation.settlement.entity.Settlement;
+import com.reconciliation.settlement.service.SettlementService;
 import com.reconciliation.transaction.entity.Transaction;
 import com.reconciliation.transaction.service.NormalizationService;
 import com.reconciliation.transaction.service.TransactionService;
@@ -17,7 +20,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @Service
 @RequiredArgsConstructor
@@ -30,7 +33,10 @@ public class TransactionProcessingService {
     private final UserIdentityService userIdentityService;
     private final WebhookEventStatusService webhookEventStatusService;
     private final PaymentFlowEventService paymentFlowEventService;
+    private final OrderMatchingService orderMatchingService;
+    private final SettlementService settlementService;
     private final ObjectMapper objectMapper;
+    private final TransactionTemplate transactionTemplate;
 
     @org.springframework.beans.factory.annotation.Value("${app.merchant.id:merchant_001}")
     private String defaultMerchantId;
@@ -40,7 +46,6 @@ public class TransactionProcessingService {
      * Reads the raw event, normalizes it, resolves user, upserts transaction.
      */
     @Async("webhookProcessingExecutor")
-    @Transactional
     public void processAsync(Long webhookEventId, String provider) {
         Optional<WebhookEvent> eventOpt = webhookEventRepository.findById(webhookEventId);
         if (eventOpt.isEmpty()) {
@@ -54,6 +59,7 @@ public class TransactionProcessingService {
             JsonNode payload = objectMapper.convertValue(
                 webhookEvent.getPayload(), JsonNode.class
             );
+            String merchantId = firstText(webhookEvent.getMerchantId(), defaultMerchantId);
             paymentFlowEventService.record(
                     provider,
                     webhookEvent.getProviderEventId(),
@@ -66,7 +72,35 @@ public class TransactionProcessingService {
                     "Webhook event picked for processing",
                     metadata("eventType", webhookEvent.getEventType()));
 
-            Transaction transaction = route(payload, provider, webhookEvent.getEventType());
+            if ("razorpay".equals(provider) && "settlement.processed".equals(webhookEvent.getEventType())) {
+                Settlement settlement = settlementService.upsertRazorpaySettlement(payload, merchantId);
+                paymentFlowEventService.record(
+                        provider,
+                        webhookEvent.getProviderEventId(),
+                        settlement.getProviderSettlementId(),
+                        webhookEventId,
+                        null,
+                        webhookEvent.getSource(),
+                        "SETTLEMENT_UPSERT",
+                        "SUCCESS",
+                        "Settlement record evaluated",
+                        metadata("merchantId", merchantId));
+                webhookEventStatusService.markProcessed(webhookEventId);
+                paymentFlowEventService.record(
+                        provider,
+                        webhookEvent.getProviderEventId(),
+                        settlement.getProviderSettlementId(),
+                        webhookEventId,
+                        null,
+                        webhookEvent.getSource(),
+                        "PROCESSING_COMPLETED",
+                        "SUCCESS",
+                        "Settlement webhook fully processed",
+                        null);
+                return;
+            }
+
+            Transaction transaction = route(payload, provider, webhookEvent.getEventType(), merchantId);
 
             if (transaction == null) {
                 log.info("Event type={} not handled — skipping id={}",
@@ -116,7 +150,8 @@ public class TransactionProcessingService {
                 transactionService.linkRefundToParent(transaction, payload, provider);
             }
 
-            TransactionUpsertResult upsertResult = transactionService.upsert(transaction);
+            TransactionUpsertResult upsertResult = transactionTemplate.execute(status ->
+                    transactionService.upsert(transaction));
             Transaction persisted = upsertResult.transaction();
             paymentFlowEventService.record(
                     provider,
@@ -133,8 +168,8 @@ public class TransactionProcessingService {
                             "currentStatus", String.valueOf(persisted.getStatus()),
                             "eventType", String.valueOf(persisted.getEventType())));
 
-            // Recompute aggregates from canonical transactions so retries,
-            // replays, and multi-stage provider events stay idempotent.
+            orderMatchingService.tryMatchByTransaction(persisted);
+
             if (persisted.getUserId() != null) {
                 userIdentityService.refreshAggregates(persisted.getUserId());
                 paymentFlowEventService.record(
@@ -183,9 +218,9 @@ public class TransactionProcessingService {
         }
     }
 
-    private Transaction route(JsonNode payload, String provider, String eventType) {
+    private Transaction route(JsonNode payload, String provider, String eventType, String merchantId) {
         return switch (provider) {
-            case "razorpay" -> routeRazorpay(payload, eventType);
+            case "razorpay" -> routeRazorpay(payload, eventType, merchantId);
             case "stripe"   -> routeStripe(payload, eventType);
             default -> {
                 log.warn("Unknown provider: {}", provider);
@@ -194,20 +229,19 @@ public class TransactionProcessingService {
         };
     }
 
-    private Transaction routeRazorpay(JsonNode payload, String eventType) {
+    private Transaction routeRazorpay(JsonNode payload, String eventType, String merchantId) {
         return switch (eventType) {
             case "payment.authorized" ->
-                normalizationService.normalizeRazorpayPaymentAuthorized(payload, defaultMerchantId);
+                normalizationService.normalizeRazorpayPaymentAuthorized(payload, merchantId);
             case "payment.captured" ->
-                normalizationService.normalizeRazorpayPaymentCaptured(payload, defaultMerchantId);
+                normalizationService.normalizeRazorpayPaymentCaptured(payload, merchantId);
             case "payment.failed" ->
-                normalizationService.normalizeRazorpayPaymentFailed(payload, defaultMerchantId);
+                normalizationService.normalizeRazorpayPaymentFailed(payload, merchantId);
             case "refund.processed" ->
-                normalizationService.normalizeRazorpayRefundProcessed(payload, defaultMerchantId);
-            case "settlement.processed" ->
-                normalizationService.normalizeRazorpaySettlementProcessed(payload, defaultMerchantId);
+                normalizationService.normalizeRazorpayRefundProcessed(payload, merchantId);
+            // settlement.processed is handled earlier in processAsync() before route() is called
             case "dispute.created" ->
-                normalizationService.normalizeRazorpayDisputeCreated(payload, defaultMerchantId);
+                normalizationService.normalizeRazorpayDisputeCreated(payload, merchantId);
             default -> {
                 log.debug("Unhandled Razorpay event type: {}", eventType);
                 yield null;
@@ -245,6 +279,15 @@ public class TransactionProcessingService {
             case "stripe" -> payload.path("data").path("object").path("id").asText(null);
             default -> null;
         };
+    }
+
+    private String firstText(String... values) {
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return null;
     }
 
     private Map<String, Object> metadata(Object... pairs) {

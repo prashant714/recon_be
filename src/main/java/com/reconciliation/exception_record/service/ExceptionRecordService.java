@@ -58,12 +58,18 @@ public class ExceptionRecordService {
 
     /**
      * Create an exception record for a settlement.
+     * Deduplicates: skips if an OPEN/IN_REVIEW exception of the same type already exists for this settlement.
      */
     @Transactional
     public ExceptionRecord createForSettlement(
             ExceptionType type, Severity severity, Long settlementId,
             Long expected, Long actual, String currency,
             String description, String merchantId) {
+
+        if (alreadyExistsForSettlement(type, settlementId)) {
+            log.debug("Exception {} already exists for settlement {}", type, settlementId);
+            return null;
+        }
 
         Long discrepancy = (expected != null && actual != null) ? (actual - expected) : null;
 
@@ -102,6 +108,74 @@ public class ExceptionRecordService {
         }
         return exceptionRecordRepository.existsByExceptionTypeAndTransactionIdAndStatusIn(
                 exceptionType, transactionId, ACTIVE_STATUSES);
+    }
+
+    @Transactional(readOnly = true)
+    public boolean alreadyExistsForSettlement(ExceptionType exceptionType, Long settlementId) {
+        if (settlementId == null) {
+            return false;
+        }
+        return exceptionRecordRepository.existsByExceptionTypeAndSettlementIdAndStatusIn(
+                exceptionType, settlementId, ACTIVE_STATUSES);
+    }
+
+    /**
+     * Create an exception for an unmatched bank statement entry (no linked transaction or settlement).
+     */
+    @Transactional
+    public ExceptionRecord createForBankEntry(
+            ExceptionType type, Severity severity, Long amount,
+            String currency, String description, String merchantId) {
+
+        ExceptionRecord record = ExceptionRecord.builder()
+                .merchantId(merchantId)
+                .exceptionType(type)
+                .severity(severity)
+                .transactionId(null)
+                .settlementId(null)
+                .expectedAmount(null)
+                .actualAmount(amount)
+                .discrepancyAmount(null)
+                .currency(currency)
+                .description(description)
+                .status(com.reconciliation.common.enums.ExceptionStatus.OPEN)
+                .detectedAt(OffsetDateTime.now())
+                .build();
+
+        return exceptionRecordRepository.save(record);
+    }
+
+    /**
+     * Create an alert-style exception for an order that has no linked transaction yet.
+     * Uses a synthetic negative transactionId based on orderId hash to enable deduplication.
+     */
+    @Transactional
+    public ExceptionRecord createForOrderAlert(
+            ExceptionType type, Severity severity, String orderId,
+            Long expectedAmount, String currency, String description, String merchantId) {
+
+        // derive a stable synthetic key for deduplication: -abs(orderId.hashCode())
+        Long syntheticKey = -Math.abs((long) orderId.hashCode());
+        if (alreadyHasOpenException(syntheticKey, type)) {
+            log.debug("Order alert exception {} already exists for orderId {}", type, orderId);
+            return null;
+        }
+
+        ExceptionRecord record = ExceptionRecord.builder()
+                .merchantId(merchantId)
+                .exceptionType(type)
+                .severity(severity)
+                .transactionId(syntheticKey)
+                .expectedAmount(expectedAmount)
+                .actualAmount(0L)
+                .discrepancyAmount(expectedAmount)
+                .currency(currency)
+                .description(description)
+                .status(com.reconciliation.common.enums.ExceptionStatus.OPEN)
+                .detectedAt(OffsetDateTime.now())
+                .build();
+
+        return exceptionRecordRepository.save(record);
     }
 
     @Transactional

@@ -99,3 +99,11 @@ app:
     gap-filler-interval-minutes: 15
     gap-filler-lookback-minutes: 30
     settlement-reconciler-cron: "0 0 2 * * *"
+  order-matching:
+    payment-grace-minutes: 30
+    order-grace-minutes: 15
+    amount-tolerance-paisa: 100
+  bank-matching:
+    amount-tolerance-paisa: 500
+    unmatched-entry-grace-hours: 48
+    overdue-settlement-days: 7

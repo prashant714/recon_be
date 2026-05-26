@@ -80,14 +80,16 @@ public class SettlementReconcilerJob {
         for (Settlement s : settled) {
             boolean hasOpenException = exceptionRecordRepository
                     .existsBySettlementIdAndStatusIn(s.getId(), activeStatuses);
-            if (!hasOpenException) {
+            boolean hasBankCredit = s.getBankCreditAmount() != null && s.getBankCreditDate() != null;
+            if (!hasOpenException && hasBankCredit) {
                 s.setSettlementStatus(SettlementStatus.MATCHED_TO_BANK);
                 settlementRepository.save(s);
                 closedAsMatched++;
                 log.info("Settlement {} closed → MATCHED_TO_BANK", s.getProviderSettlementId());
             } else {
                 remainedDiscrepant++;
-                log.warn("Settlement {} has open exceptions, skipping closure", s.getProviderSettlementId());
+                log.warn("Settlement {} is not ready for MATCHED_TO_BANK closure: hasOpenException={} hasBankCredit={}",
+                        s.getProviderSettlementId(), hasOpenException, hasBankCredit);
             }
         }
 

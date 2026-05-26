@@ -6,6 +6,7 @@ import com.reconciliation.transaction.entity.Transaction;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -30,6 +31,20 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long> 
             String provider, String providerTransactionId);
 
     List<Transaction> findByMerchantIdAndOrderId(String merchantId, String orderId);
+
+    List<Transaction> findByMerchantIdOrderByEventOccurredAtDesc(String merchantId, Pageable pageable);
+
+    @Query("""
+        SELECT t FROM Transaction t
+        WHERE t.merchantId = :merchantId
+          AND t.orderId = :orderId
+          AND t.status = com.reconciliation.common.enums.TransactionStatus.CAPTURED
+          AND t.eventType = com.reconciliation.common.enums.EventType.PAYMENT
+        ORDER BY t.eventOccurredAt DESC
+        """)
+    Optional<Transaction> findFirstCapturedByMerchantIdAndOrderId(
+            @Param("merchantId") String merchantId,
+            @Param("orderId") String orderId);
 
     Optional<Transaction> findByProviderAndMerchantIdAndProviderOrderId(
             String provider, String merchantId, String providerOrderId);
@@ -131,7 +146,32 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long> 
     """)
     Long sumNetAmountBySettlementId(@Param("settlementId") String settlementId);
 
+    /**
+     * Captured payments that have a providerOrderId but are still waiting on order reconciliation.
+     */
+    @Query("""
+        SELECT t FROM Transaction t
+        WHERE t.status = com.reconciliation.common.enums.TransactionStatus.CAPTURED
+          AND t.eventType = com.reconciliation.common.enums.EventType.PAYMENT
+          AND t.providerOrderId IS NOT NULL
+          AND t.reconciliationStatus = com.reconciliation.common.enums.ReconciliationStatus.PENDING_SETTLEMENT
+          AND t.eventOccurredAt < :cutoff
+        """)
+    List<Transaction> findCapturedWithProviderOrderIdAndNoMatchedOrder(
+            @Param("cutoff") OffsetDateTime cutoff);
+
+    List<Transaction> findBySettlementId(String settlementId);
+
     long countByReconciliationStatus(ReconciliationStatus status);
+
+    long countByMerchantId(String merchantId);
+
+    long countByMerchantIdAndReconciliationStatus(String merchantId, ReconciliationStatus status);
+
+    long countByMerchantIdAndEventOccurredAtAfter(String merchantId, OffsetDateTime since);
+
+    long countByMerchantIdAndReconciliationStatusAndEventOccurredAtAfter(
+            String merchantId, ReconciliationStatus status, OffsetDateTime since);
 
     @Query("""
         SELECT COUNT(t)
@@ -160,4 +200,32 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long> 
         GROUP BY LOWER(COALESCE(t.provider, 'unknown'))
     """)
     List<Object[]> findProviderSummarySince(@Param("since") OffsetDateTime since);
+
+    @Query("""
+        SELECT LOWER(COALESCE(t.provider, 'unknown')),
+               COUNT(t),
+               SUM(CASE WHEN t.reconciliationStatus = com.reconciliation.common.enums.ReconciliationStatus.EXCEPTION
+                        THEN 1 ELSE 0 END)
+        FROM Transaction t
+        WHERE t.merchantId = :merchantId
+          AND t.eventOccurredAt >= :since
+        GROUP BY LOWER(COALESCE(t.provider, 'unknown'))
+    """)
+    List<Object[]> findProviderSummaryForMerchantSince(
+            @Param("merchantId") String merchantId,
+            @Param("since") OffsetDateTime since);
+
+    @Query(value = """
+        SELECT CAST(t.event_occurred_at AS date) AS bucket,
+               SUM(CASE WHEN t.reconciliation_status = 'MATCHED' THEN 1 ELSE 0 END) AS matched,
+               COUNT(*) AS transactions
+        FROM transactions t
+        WHERE t.merchant_id = :merchantId
+          AND t.event_occurred_at >= :since
+        GROUP BY CAST(t.event_occurred_at AS date)
+        ORDER BY bucket
+        """, nativeQuery = true)
+    List<Object[]> findDailyTransactionTrend(
+            @Param("merchantId") String merchantId,
+            @Param("since") OffsetDateTime since);
 }
