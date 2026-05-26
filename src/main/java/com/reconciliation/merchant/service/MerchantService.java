@@ -22,7 +22,7 @@ public class MerchantService {
     private final BCryptPasswordEncoder passwordEncoder;
 
     @Transactional
-    public Map<String, String> register(String merchantId, String name, String email) {
+    public Map<String, String> register(String merchantId, String name, String email, String password) {
         if (merchantRepository.existsByMerchantId(merchantId)) {
             throw new IllegalArgumentException("Merchant ID already registered: " + merchantId);
         }
@@ -39,6 +39,7 @@ public class MerchantService {
                 .name(name)
                 .email(email)
                 .apiKeyHash(hashedKey)
+                .passwordHash(password != null ? passwordEncoder.encode(password) : null)
                 .webhookSecret(webhookSecret)
                 .status("ACTIVE")
                 .build());
@@ -48,6 +49,7 @@ public class MerchantService {
                 "merchantId", merchantId,
                 "apiKey", rawApiKey,
                 "webhookSecret", webhookSecret,
+                "loginEnabled", String.valueOf(password != null),
                 "note", "Store this API key securely — it will not be shown again."
         );
     }
@@ -89,6 +91,44 @@ public class MerchantService {
             merchant.setEmail(email.trim().toLowerCase());
         }
         return merchantRepository.save(merchant);
+    }
+
+    @Transactional(readOnly = true)
+    public String loginByEmail(String email, String rawPassword) {
+        Merchant merchant = merchantRepository.findByEmail(email)
+                .orElseThrow(() -> new IllegalArgumentException("Invalid email or password"));
+
+        if (merchant.getPasswordHash() == null) {
+            throw new IllegalStateException(
+                    "Password not configured. Use API key auth and call /set-password first.");
+        }
+
+        if (!"ACTIVE".equals(merchant.getStatus())) {
+            throw new IllegalStateException("Merchant account is not active");
+        }
+
+        if (!passwordEncoder.matches(rawPassword, merchant.getPasswordHash())) {
+            throw new IllegalArgumentException("Invalid email or password");
+        }
+
+        return jwtConfig.generateMerchantToken(merchant.getMerchantId());
+    }
+
+    @Transactional
+    public void setPassword(String merchantId, String rawPassword) {
+        Merchant merchant = getByMerchantId(merchantId);
+        merchant.setPasswordHash(passwordEncoder.encode(rawPassword));
+        merchantRepository.save(merchant);
+        log.info("Password set for merchant: {}", merchantId);
+    }
+
+    @Transactional(readOnly = true)
+    public String refreshToken(String merchantId) {
+        Merchant merchant = getByMerchantId(merchantId);
+        if (!"ACTIVE".equals(merchant.getStatus())) {
+            throw new IllegalStateException("Merchant account is not active");
+        }
+        return jwtConfig.generateMerchantToken(merchantId);
     }
 
     @Transactional

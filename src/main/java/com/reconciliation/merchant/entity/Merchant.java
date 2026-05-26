@@ -40,6 +40,9 @@ public class Merchant {
     @Column(name = "api_key_hash", nullable = false, length = 256)
     private String apiKeyHash;
 
+    @Column(name = "password_hash", length = 256)
+    private String passwordHash;
+
     @Column(name = "webhook_secret", length = 256)
     private String webhookSecret;
 
