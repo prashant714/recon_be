@@ -173,6 +173,11 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long> 
     long countByMerchantIdAndReconciliationStatusAndEventOccurredAtAfter(
             String merchantId, ReconciliationStatus status, OffsetDateTime since);
 
+    long countByMerchantIdAndEventOccurredAtBetween(String merchantId, OffsetDateTime from, OffsetDateTime to);
+
+    long countByMerchantIdAndReconciliationStatusAndEventOccurredAtBetween(
+            String merchantId, ReconciliationStatus status, OffsetDateTime from, OffsetDateTime to);
+
     @Query("""
         SELECT COUNT(t)
         FROM Transaction t
@@ -215,6 +220,22 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long> 
             @Param("merchantId") String merchantId,
             @Param("since") OffsetDateTime since);
 
+    @Query("""
+        SELECT LOWER(COALESCE(t.provider, 'unknown')),
+               COUNT(t),
+               SUM(CASE WHEN t.reconciliationStatus = com.reconciliation.common.enums.ReconciliationStatus.EXCEPTION
+                        THEN 1 ELSE 0 END)
+        FROM Transaction t
+        WHERE t.merchantId = :merchantId
+          AND t.eventOccurredAt >= :from
+          AND t.eventOccurredAt < :to
+        GROUP BY LOWER(COALESCE(t.provider, 'unknown'))
+    """)
+    List<Object[]> findProviderSummaryForMerchantBetween(
+            @Param("merchantId") String merchantId,
+            @Param("from") OffsetDateTime from,
+            @Param("to") OffsetDateTime to);
+
     @Query(value = """
         SELECT CAST(t.event_occurred_at AS date) AS bucket,
                SUM(CASE WHEN t.reconciliation_status = 'MATCHED' THEN 1 ELSE 0 END) AS matched,
@@ -228,4 +249,20 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long> 
     List<Object[]> findDailyTransactionTrend(
             @Param("merchantId") String merchantId,
             @Param("since") OffsetDateTime since);
+
+    @Query(value = """
+        SELECT CAST(t.event_occurred_at AS date) AS bucket,
+               SUM(CASE WHEN t.reconciliation_status = 'MATCHED' THEN 1 ELSE 0 END) AS matched,
+               COUNT(*) AS transactions
+        FROM transactions t
+        WHERE t.merchant_id = :merchantId
+          AND t.event_occurred_at >= :from
+          AND t.event_occurred_at < :to
+        GROUP BY CAST(t.event_occurred_at AS date)
+        ORDER BY bucket
+        """, nativeQuery = true)
+    List<Object[]> findDailyTransactionTrendBetween(
+            @Param("merchantId") String merchantId,
+            @Param("from") OffsetDateTime from,
+            @Param("to") OffsetDateTime to);
 }

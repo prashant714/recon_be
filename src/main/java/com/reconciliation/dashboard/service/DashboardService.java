@@ -26,17 +26,18 @@ public class DashboardService {
     private final TransactionRepository transactionRepository;
     private final ExceptionRecordRepository exceptionRecordRepository;
 
-    public Map<String, Object> summary(String merchantId, int days) {
-        OffsetDateTime from = OffsetDateTime.now().minusDays(days);
+    public Map<String, Object> summary(String merchantId, LocalDate fromDate, LocalDate toDate) {
+        OffsetDateTime from = fromDate.atStartOfDay().atOffset(OffsetDateTime.now().getOffset());
+        OffsetDateTime to = toDate.plusDays(1).atStartOfDay().atOffset(OffsetDateTime.now().getOffset());
 
-        long totalTransactions = transactionRepository.countByMerchantIdAndEventOccurredAtAfter(merchantId, from);
-        long matched = transactionRepository.countByMerchantIdAndReconciliationStatusAndEventOccurredAtAfter(
-                merchantId, ReconciliationStatus.MATCHED, from);
-        long openExceptions = exceptionRecordRepository.countOpenExceptions(merchantId, from);
+        long totalTransactions = transactionRepository.countByMerchantIdAndEventOccurredAtBetween(merchantId, from, to);
+        long matched = transactionRepository.countByMerchantIdAndReconciliationStatusAndEventOccurredAtBetween(
+                merchantId, ReconciliationStatus.MATCHED, from, to);
+        long openExceptions = exceptionRecordRepository.countOpenExceptionsBetween(merchantId, from, to);
         double matchRate = totalTransactions == 0 ? 0.0 : (matched * 100.0) / totalTransactions;
 
         Map<String, Map<String, Long>> byProvider = new LinkedHashMap<>();
-        for (Object[] row : transactionRepository.findProviderSummaryForMerchantSince(merchantId, from)) {
+        for (Object[] row : transactionRepository.findProviderSummaryForMerchantBetween(merchantId, from, to)) {
             String provider = row[0] == null ? "unknown" : row[0].toString();
             long total = toLong(row[1]);
             long exceptions = toLong(row[2]);
@@ -44,14 +45,15 @@ public class DashboardService {
         }
 
         Map<String, Long> byExceptionType = new LinkedHashMap<>();
-        for (Object[] row : exceptionRecordRepository.countByTypeForMerchant(merchantId, from)) {
+        for (Object[] row : exceptionRecordRepository.countByTypeForMerchantBetween(merchantId, from, to)) {
             byExceptionType.put(String.valueOf(row[0]), toLong(row[1]));
         }
 
         List<ExceptionRecord> recentExceptions = exceptionRecordRepository
-                .findByMerchantIdAndDetectedAtAfter(
+                .findByMerchantIdAndDetectedAtBetween(
                         merchantId,
                         from,
+                        to,
                         org.springframework.data.domain.PageRequest.of(
                                 0, 5,
                                 org.springframework.data.domain.Sort.by(
@@ -60,7 +62,8 @@ public class DashboardService {
                 .getContent();
 
         return Map.of(
-                "days", days,
+                "fromDate", fromDate.toString(),
+                "toDate", toDate.toString(),
                 "totalTransactions", totalTransactions,
                 "matched", matched,
                 "openExceptions", openExceptions,
@@ -78,15 +81,19 @@ public class DashboardService {
                         .toList());
     }
 
-    public Map<String, Object> metrics(String merchantId) {
-        OffsetDateTime from = OffsetDateTime.now().minusDays(30);
-        long processed = transactionRepository.countByMerchantIdAndEventOccurredAtAfter(merchantId, from);
-        long matched = transactionRepository.countByMerchantIdAndReconciliationStatusAndEventOccurredAtAfter(
-                merchantId, ReconciliationStatus.MATCHED, from);
+    public Map<String, Object> metrics(String merchantId, LocalDate fromDate, LocalDate toDate) {
+        OffsetDateTime from = fromDate.atStartOfDay().atOffset(OffsetDateTime.now().getOffset());
+        OffsetDateTime to = toDate.plusDays(1).atStartOfDay().atOffset(OffsetDateTime.now().getOffset());
+
+        long processed = transactionRepository.countByMerchantIdAndEventOccurredAtBetween(merchantId, from, to);
+        long matched = transactionRepository.countByMerchantIdAndReconciliationStatusAndEventOccurredAtBetween(
+                merchantId, ReconciliationStatus.MATCHED, from, to);
         long exceptionCount = exceptionRecordRepository.countByMerchantIdAndStatusIn(merchantId,
                 List.of(ExceptionStatus.OPEN, ExceptionStatus.IN_REVIEW));
 
         return Map.of(
+                "fromDate", fromDate.toString(),
+                "toDate", toDate.toString(),
                 "transactionsProcessed", processed,
                 "openExceptions", exceptionCount,
                 "matchRate", processed == 0 ? 0.0 : matched * 100.0 / processed,
@@ -116,17 +123,16 @@ public class DashboardService {
         return Map.of("items", sorted);
     }
 
-    public Map<String, Object> trends(String merchantId, int days) {
-        int safeDays = Math.min(Math.max(days, 1), 90);
-        LocalDate start = LocalDate.now().minusDays(safeDays - 1L);
-        OffsetDateTime since = start.atStartOfDay().atOffset(OffsetDateTime.now().getOffset());
+    public Map<String, Object> trends(String merchantId, LocalDate fromDate, LocalDate toDate) {
+        OffsetDateTime since = fromDate.atStartOfDay().atOffset(OffsetDateTime.now().getOffset());
+        OffsetDateTime until = toDate.plusDays(1).atStartOfDay().atOffset(OffsetDateTime.now().getOffset());
 
         Map<LocalDate, long[]> buckets = new LinkedHashMap<>();
-        for (int i = 0; i < safeDays; i++) {
-            buckets.put(start.plusDays(i), new long[] {0L, 0L, 0L});
+        for (LocalDate d = fromDate; !d.isAfter(toDate); d = d.plusDays(1)) {
+            buckets.put(d, new long[] {0L, 0L, 0L});
         }
 
-        for (Object[] row : transactionRepository.findDailyTransactionTrend(merchantId, since)) {
+        for (Object[] row : transactionRepository.findDailyTransactionTrendBetween(merchantId, since, until)) {
             LocalDate date = toLocalDate(row[0]);
             long matched = toLong(row[1]);
             long transactions = toLong(row[2]);
@@ -137,7 +143,7 @@ public class DashboardService {
             }
         }
 
-        for (Object[] row : exceptionRecordRepository.findDailyExceptionTrend(merchantId, since)) {
+        for (Object[] row : exceptionRecordRepository.findDailyExceptionTrendBetween(merchantId, since, until)) {
             LocalDate date = toLocalDate(row[0]);
             long exceptions = toLong(row[1]);
             if (buckets.containsKey(date)) {

@@ -11,26 +11,28 @@ This document explains every part of the system end-to-end. A reader with no pri
 3. [High-Level Architecture](#3-high-level-architecture)
 4. [Project Structure](#4-project-structure)
 5. [Security Layer](#5-security-layer)
-6. [Webhook Ingestion Flow](#6-webhook-ingestion-flow)
-7. [Transaction Processing Flow](#7-transaction-processing-flow)
-8. [Normalization — Provider to Canonical Format](#8-normalization--provider-to-canonical-format)
-9. [User Identity Resolution](#9-user-identity-resolution)
-10. [Transaction Upsert Logic](#10-transaction-upsert-logic)
-11. [Order Matching Flow](#11-order-matching-flow)
-12. [Reconciliation Engine](#12-reconciliation-engine)
-13. [Reconciliation Rules Deep Dive](#13-reconciliation-rules-deep-dive)
-14. [Exception Management](#14-exception-management)
-15. [Settlement Reconciliation](#15-settlement-reconciliation)
-16. [Bank Statement Matching](#16-bank-statement-matching)
-17. [Gap Filler — Polling for Missed Events](#17-gap-filler--polling-for-missed-events)
-18. [Admin Operations](#18-admin-operations)
-19. [Dashboard and Metrics](#19-dashboard-and-metrics)
-20. [Audit Logging](#20-audit-logging)
-21. [Scheduled Jobs Summary](#21-scheduled-jobs-summary)
-22. [Data Model](#22-data-model)
-23. [API Reference](#23-api-reference)
-24. [Configuration Reference](#24-configuration-reference)
-25. [Testing Strategy](#25-testing-strategy)
+6. [Merchant Management & Authentication](#6-merchant-management--authentication)
+7. [Provider Connections](#7-provider-connections)
+8. [Webhook Ingestion Flow](#8-webhook-ingestion-flow)
+9. [Transaction Processing Flow](#9-transaction-processing-flow)
+10. [Normalization — Provider to Canonical Format](#10-normalization--provider-to-canonical-format)
+11. [User Identity Resolution](#11-user-identity-resolution)
+12. [Transaction Upsert Logic](#12-transaction-upsert-logic)
+13. [Order Matching Flow](#13-order-matching-flow)
+14. [Reconciliation Engine](#14-reconciliation-engine)
+15. [Reconciliation Rules Deep Dive](#15-reconciliation-rules-deep-dive)
+16. [Exception Management](#16-exception-management)
+17. [Settlement Reconciliation](#17-settlement-reconciliation)
+18. [Bank Statement Matching](#18-bank-statement-matching)
+19. [Gap Filler — Polling for Missed Events](#19-gap-filler--polling-for-missed-events)
+20. [Admin Operations](#20-admin-operations)
+21. [Dashboard and Metrics](#21-dashboard-and-metrics)
+22. [Audit Logging](#22-audit-logging)
+23. [Scheduled Jobs Summary](#23-scheduled-jobs-summary)
+24. [Data Model](#24-data-model)
+25. [API Reference](#25-api-reference)
+26. [Configuration Reference](#26-configuration-reference)
+27. [Testing Strategy](#27-testing-strategy)
 
 ---
 
@@ -52,7 +54,8 @@ This platform:
 - **Creates exception records** for every anomaly found
 - **Allows ops teams** to review, resolve, or ignore exceptions
 - **Polls providers** on a schedule to catch any events missed by webhooks
-- **Provides dashboards** showing match rates, open exceptions, and provider summaries
+- **Stores encrypted per-merchant provider credentials** for multi-tenant API polling
+- **Provides dashboards** showing match rates, open exceptions, activity feeds, and trend data
 
 ---
 
@@ -61,18 +64,19 @@ This platform:
 | Component | Choice | Notes |
 |---|---|---|
 | Language | Java 21 | Uses virtual threads, switch expressions |
-| Framework | Spring Boot 3.2 | Web, Security, JPA, Actuator |
-| Database | PostgreSQL | All tables use identity columns |
-| Migrations | Flyway | V1–V13 migrations, runs on startup |
+| Framework | Spring Boot 3.2.12 | Web, Security, JPA, Actuator |
+| Database | PostgreSQL 16 | All tables use identity columns |
+| Migrations | Flyway | V1–V18 migrations, runs on startup |
 | Scheduling | db-scheduler 14 | Distributed scheduler backed by PostgreSQL — safe for multi-instance deployments |
 | Async | Spring `@Async` with virtual threads | Java 21 virtual threads enabled via `AsyncConfig` |
-| Auth | JWT (jjwt 0.12) | Stateless; merchant and admin token types; webhook endpoints are public |
-| Rate Limiting | Bucket4j 8.10 | Token bucket, per-IP, webhooks only |
+| Auth | JWT (jjwt 0.12.5) | Stateless; merchant and admin token types; webhook endpoints are public |
+| Rate Limiting | Bucket4j 8.10.1 | Token bucket, per-IP, webhooks only |
 | Razorpay SDK | razorpay-java 1.4.3 | Used for polling |
-| Stripe SDK | stripe-java 25.3 | Used for polling |
-| API Docs | SpringDoc / Swagger | Available at `/swagger-ui.html` |
+| Stripe SDK | stripe-java 25.3.0 | Used for polling |
+| API Docs | SpringDoc OpenAPI 2.3.0 | Available at `/swagger-ui.html` |
 | Metrics | Micrometer + Prometheus | Exposed at `/actuator/prometheus` |
 | Build | Gradle 8 | Java 21 toolchain |
+| Containerization | Docker (multi-stage build) | eclipse-temurin:21-jre-alpine |
 
 ---
 
@@ -117,23 +121,38 @@ This platform:
 │  SettlementReconcilerJob (2 AM daily) ──► close SETTLED settlements │
 │                                      └─► flag overdue PENDING ones  │
 │                                                                     │
-│  SettlementReportSyncJob ──► sync provider report lines             │
-│  BankStatementCatchUpJob  ──► retry PENDING bank entry matches      │
+│  SettlementReportSyncJob (every 2 hours) ──► sync provider lines    │
+│  BankStatementCatchUpJob (9 AM daily) ──► retry PENDING matches     │
+│                                       └─► flag overdue entries      │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                      MERCHANT SELF-SERVICE                          │
+│                                                                     │
+│  POST /api/v1/merchants/register  ──► create merchant, get API key  │
+│  POST /api/v1/merchants/login     ──► email + password → JWT        │
+│  POST /api/v1/merchants/auth      ──► API key → JWT                 │
+│  POST /api/v1/merchants/refresh   ──► extend JWT                    │
+│  POST /api/v1/connections         ──► store encrypted provider creds│
+│  GET  /api/v1/merchants/me        ──► merchant profile              │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        OPERATIONS APIs                              │
 │                                                                     │
 │  GET  /api/v1/dashboard/summary      ──► DashboardService           │
+│  GET  /api/v1/dashboard/metrics      ──► DashboardService           │
+│  GET  /api/v1/dashboard/activity     ──► DashboardService           │
+│  GET  /api/v1/dashboard/trends       ──► DashboardService           │
 │  GET  /api/v1/exceptions             ──► ExceptionQueryService      │
 │  GET  /api/v1/transactions           ──► TransactionQueryService    │
 │  GET  /api/v1/settlements            ──► SettlementService          │
 │  GET  /api/v1/orders                 ──► OrderService               │
-│  POST /api/v1/bank-statements/upload ──► BankStatementMatchingService│
-│  POST /api/v1/merchants              ──► MerchantService            │
+│  POST /api/v1/bank-statements/upload ──► CSV upload + matching      │
 │  POST /api/v1/admin/replay           ──► AdminService               │
 │  POST /api/v1/admin/poll             ──► AdminService (live poll)   │
 │  POST /api/v1/admin/settlement-reconciler/run ──► manual trigger    │
+│  POST /api/v1/admin/reconcile-transactions    ──► batch reconcile   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -178,6 +197,12 @@ src/main/java/com/reconciliation/
 │   ├── repository/MerchantRepository.java
 │   └── service/MerchantService.java
 │
+├── connection/                      # Per-merchant provider credentials
+│   ├── controller/ProviderConnectionController.java
+│   ├── entity/ProviderConnection.java
+│   ├── repository/ProviderConnectionRepository.java
+│   └── service/ProviderConnectionService.java
+│
 ├── user/                            # Payer identity resolution
 │   ├── entity/User.java
 │   ├── repository/UserRepository.java
@@ -206,7 +231,7 @@ src/main/java/com/reconciliation/
 │   ├── repository/                  # SettlementRepository, SettlementReportLineRepository
 │   └── service/SettlementService.java
 │
-├── dashboard/                       # Summary metrics
+├── dashboard/                       # Summary metrics, activity, trends
 │   ├── controller/DashboardController.java
 │   └── service/DashboardService.java
 │
@@ -242,7 +267,9 @@ src/main/java/com/reconciliation/
     ├── enums/                       # Provider, EventType, TransactionStatus,
     │                                # ReconciliationStatus, ExceptionType,
     │                                # ExceptionStatus, Severity, SettlementStatus,
-    │                                # OrderStatus, BankEntryStatus, ReportLineMatchStatus
+    │                                # OrderStatus, BankEntryStatus,
+    │                                # ReportLineMatchStatus,
+    │                                # BankStatementUploadStatus, ConnectionStatus
     ├── exception/                   # GlobalExceptionHandler, domain exceptions
     └── util/                        # AmountUtils, CurrencyUtils, TimestampUtils,
                                      # EncryptionService
@@ -281,12 +308,17 @@ Route-level authorization rules:
 
 | Path pattern | Rule |
 |---|---|
+| `OPTIONS /**` | Permit all (CORS preflight) |
 | `/webhooks/**` | Permit all (no JWT required — signature verified at controller level) |
+| `/api/v1/merchants/register` | Permit all (merchant self-registration) |
+| `/api/v1/merchants/login` | Permit all (email + password auth) |
+| `/api/v1/merchants/auth` | Permit all (API key auth) |
+| `/api/v1/merchants/reset-key` | Permit all (API key reset) |
 | `/actuator/health`, `/actuator/prometheus` | Permit all |
 | `/swagger-ui/**`, `/api-docs/**` | Permit all |
-| Everything else (`/api/**`) | Must be authenticated (valid JWT) |
+| `/api/v1/**` | Must be authenticated (valid JWT) |
 
-Sessions are stateless (no HTTP session created). CSRF is disabled for `/webhooks/**` and `/api/**`.
+Sessions are stateless (no HTTP session created). CSRF is disabled for `/webhooks/**` and `/api/**`. HTTP Basic and Form Login are disabled.
 
 ### Webhook Signature Verification
 
@@ -294,6 +326,7 @@ Webhook controllers perform HMAC verification before any processing.
 
 **Razorpay** (`RazorpaySignatureService`):
 - Computes `HMAC-SHA256(rawBody, webhookSecret)` and hex-encodes it
+- Resolves the matching merchant by checking per-merchant webhook secrets, then falls back to the default secret
 - Compares with the `X-Razorpay-Signature` header using constant-time comparison (`MessageDigest.isEqual`)
 - Returns HTTP 400 if verification fails
 
@@ -304,7 +337,141 @@ Webhook controllers perform HMAC verification before any processing.
 
 ---
 
-## 6. Webhook Ingestion Flow
+## 6. Merchant Management & Authentication
+
+The platform supports multi-tenant operation with self-service merchant registration and multiple authentication methods.
+
+### Merchant Entity
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | bigint PK | Auto-generated |
+| `merchantId` | varchar(60) | Unique business identifier |
+| `name` | varchar(120) | Display name |
+| `email` | varchar(254) | Unique, used for login |
+| `apiKeyHash` | varchar(256) | BCrypt hash of API key |
+| `passwordHash` | varchar(256) | BCrypt hash of login password (optional) |
+| `webhookSecret` | varchar(256) | Per-merchant webhook signing secret |
+| `status` | varchar(20) | Default `"ACTIVE"` |
+| `createdAt` | timestamptz | Auto-set on create |
+| `updatedAt` | timestamptz | Auto-set on create/update |
+
+### Registration
+
+```
+POST /api/v1/merchants/register
+{
+  "merchantId": "merchant_001",
+  "name": "Acme Corp",
+  "email": "admin@acme.com",
+  "password": "optional-password"
+}
+```
+
+**What happens:**
+1. Generates a 32-byte Base64 URL-safe API key
+2. Generates a webhook secret (UUID)
+3. Stores BCrypt hash of the API key (never stores plaintext)
+4. Optionally stores BCrypt hash of the password
+5. Returns the API key **one time only** — it cannot be retrieved again
+
+### Authentication Methods
+
+**Method 1 — API Key Auth** (server-to-server):
+```
+POST /api/v1/merchants/auth
+{ "merchantId": "merchant_001", "apiKey": "the-api-key" }
+```
+Validates the API key against the stored BCrypt hash and returns a merchant JWT.
+
+**Method 2 — Email + Password Login** (frontend / human):
+```
+POST /api/v1/merchants/login
+{ "email": "admin@acme.com", "password": "the-password" }
+```
+Validates credentials and returns a merchant JWT. Requires a password to have been set during registration or via `set-password`.
+
+**Method 3 — Token Refresh**:
+```
+POST /api/v1/merchants/refresh
+Authorization: Bearer <valid-jwt>
+```
+Issues a new JWT with extended expiry from a still-valid token.
+
+### Merchant JWT Claims
+
+```json
+{
+  "sub": "merchant_001",
+  "type": "merchant",
+  "merchantId": "merchant_001",
+  "iat": 1700000000,
+  "exp": 1700086400
+}
+```
+
+All authenticated API endpoints extract `merchantId` from the JWT to scope data access.
+
+### Self-Service Operations
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/v1/merchants/set-password` | Set or update login password (requires JWT) |
+| `POST /api/v1/merchants/reset-key` | Generate new API key (returns one-time) |
+| `GET /api/v1/merchants/me` | Get merchant profile (requires JWT) |
+
+---
+
+## 7. Provider Connections
+
+Merchants store their Razorpay and Stripe API credentials in the platform so that polling jobs and admin-triggered polls can authenticate against the provider APIs on a per-merchant basis.
+
+### ProviderConnection Entity
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | bigint PK | Auto-generated |
+| `merchantId` | varchar(60) | Owner merchant |
+| `provider` | varchar(30) | `razorpay` or `stripe` |
+| `apiKeyEncrypted` | text | AES-encrypted API key |
+| `secretEncrypted` | text | AES-encrypted API secret |
+| `apiKeyMasked` | varchar | First 4 + `****` + last 4 chars (for display) |
+| `status` | enum | `ACTIVE` or `DISABLED` |
+| `createdAt` | timestamptz | |
+| `updatedAt` | timestamptz | |
+
+Unique constraint on `(merchantId, provider)` — one connection per provider per merchant.
+
+### API
+
+**Save/update connection:**
+```
+POST /api/v1/connections
+{
+  "provider": "razorpay",
+  "apiKey": "rzp_live_xxxxx",
+  "secret": "xxxxx"
+}
+```
+Encrypts credentials using `EncryptionService` (AES) before storage. If a connection already exists for the provider, it is updated.
+
+**List connections:**
+```
+GET /api/v1/connections
+```
+Returns connections with masked API keys (never exposes plaintext or encrypted values).
+
+### Usage in Polling
+
+The `GapFillerJob` and `AdminService.poll()` use `ProviderConnectionService` to:
+1. Find all active connections for a given provider
+2. Decrypt the API key and secret at runtime
+3. Initialize the provider SDK client with per-merchant credentials
+4. Poll for missed events scoped to that merchant
+
+---
+
+## 8. Webhook Ingestion Flow
 
 This is the entry point for all payment events, whether they arrive via live webhook or via polling.
 
@@ -314,6 +481,7 @@ This is the entry point for all payment events, whether they arrive via live web
 Provider  ──POST──►  WebhookController
                           │
                     verify HMAC signature
+                    (resolve merchantId from webhook secret)
                           │ (fail → 400)
                           │ (pass → continue)
                           ▼
@@ -364,10 +532,11 @@ Provider  ──POST──►  WebhookController
 | `processingError` | Populated if processing threw an exception |
 | `source` | `webhook`, `polling`, or `admin-poll` |
 | `signatureValid` | Always `true` — set at ingestion (signature verified at controller) |
+| `merchantId` | Resolved from webhook signature verification |
 
 ---
 
-## 7. Transaction Processing Flow
+## 9. Transaction Processing Flow
 
 `TransactionProcessingService.processAsync()` runs on virtual threads (Java 21, configured via `AsyncConfig`). It is annotated with `@Async` and `@Transactional`.
 
@@ -428,7 +597,7 @@ processAsync(webhookEventId, provider)
 
 ---
 
-## 8. Normalization — Provider to Canonical Format
+## 10. Normalization — Provider to Canonical Format
 
 `NormalizationService` converts provider-specific JSON payloads into a uniform `Transaction` entity. This isolates all provider-specific parsing in one place.
 
@@ -485,7 +654,7 @@ Stripe uses a flat `data.object` path:
 |---|---|---|
 | `provider` | hardcoded per method | `"razorpay"` or `"stripe"` |
 | `providerTransactionId` | payment/charge/refund `id` | unique per provider |
-| `merchantId` | passed in from config | `merchant_001` by default |
+| `merchantId` | resolved from webhook signature | per-merchant scoping |
 | `eventType` | mapped from event name | `PAYMENT`, `REFUND`, `CHARGEBACK` |
 | `status` | mapped from event name | `AUTHORIZED`, `CAPTURED`, `FAILED`, `REFUNDED`, `DISPUTED` |
 | `presentmentAmount` | amount field (paisa or cents) | raw integer, smallest currency unit |
@@ -510,7 +679,7 @@ Stripe uses a flat `data.object` path:
 
 ---
 
-## 9. User Identity Resolution
+## 11. User Identity Resolution
 
 `UserIdentityService.resolveUserId()` finds or creates a `User` record for the payer behind a transaction. This enables per-user analytics (total spend, failed count) and allows ops to see all transactions for a single customer.
 
@@ -541,7 +710,7 @@ After a transaction is upserted, `incrementAggregates()` atomically updates:
 
 ---
 
-## 10. Transaction Upsert Logic
+## 12. Transaction Upsert Logic
 
 `TransactionService.upsert()` handles both new transactions and updates to existing ones. The key design principle is **event-time ordering**: a newer event always wins over an older one for the same transaction.
 
@@ -582,7 +751,7 @@ find existing by (provider, providerTransactionId)
 
 ---
 
-## 11. Order Matching Flow
+## 13. Order Matching Flow
 
 The order domain allows merchants to pre-register expected payment amounts for each order. When a payment is captured, the platform automatically matches it against the correct order and flags any amount discrepancies.
 
@@ -594,6 +763,7 @@ An `Order` represents a merchant-created expectation:
 - `expectedAmount` — the amount the merchant expects to collect
 - `orderStatus` — `CREATED → PAYMENT_RECEIVED / OVERPAID / UNDERPAID / CANCELLED / REFUNDED`
 - `transactionId` — FK to the matched `Transaction` once payment is received
+- `amountMatched` — boolean flag indicating whether amounts match
 - `discrepancyAmount` — difference between `expectedAmount` and actual payment
 
 ### Two-way matching
@@ -644,7 +814,7 @@ Configurable via `app.order-matching.amount-tolerance-paisa` (default 100 paisa 
 
 ---
 
-## 12. Reconciliation Engine
+## 14. Reconciliation Engine
 
 `ReconciliationEngine.runAll()` executes all reconciliation rules in sequence. Rules are Spring beans implementing the `ReconciliationRule` interface, so new rules are picked up automatically by Spring's dependency injection without any registration step.
 
@@ -665,7 +835,7 @@ public interface ReconciliationRule {
 
 ---
 
-## 13. Reconciliation Rules Deep Dive
+## 15. Reconciliation Rules Deep Dive
 
 ### ExactIdMatchRule
 
@@ -744,7 +914,9 @@ The tolerance (default 100 paisa = ₹1) is configurable via `app.reconciliation
 **Logic:**
 - For each pending line, look up a transaction by `providerTxnId`
 - Found → mark line `MATCHED`, link `matchedToTxnId`
-- Not found → mark line `UNMATCHED`, create `PROVIDER_REPORT_DISCREPANCY` exception
+- Not found → mark line status accordingly, create `PROVIDER_REPORT_MISMATCH` exception
+
+**Report line match statuses:** `PENDING`, `MATCHED`, `AMOUNT_MISMATCH`, `NOT_FOUND_IN_DB`
 
 This rule catches cases where a provider credits an amount in their settlement report for a transaction the platform never received via webhook or polling.
 
@@ -768,7 +940,7 @@ For order-level exceptions, a synthetic hash key based on `(merchantId, orderId,
 
 ---
 
-## 14. Exception Management
+## 16. Exception Management
 
 An `ExceptionRecord` represents an anomaly detected by the reconciliation engine or the bank statement matching process.
 
@@ -777,18 +949,21 @@ An `ExceptionRecord` represents an anomaly detected by the reconciliation engine
 | Type | Created by | Severity |
 |---|---|---|
 | `UNMATCHED_PAYMENT` | ExactIdMatchRule | MEDIUM |
+| `UNMATCHED_REFUND` | Refund matching | MEDIUM |
 | `MISSING_CAPTURE` | MissingCaptureRule | HIGH |
 | `ORPHAN_REFUND` | OrphanRefundRule | HIGH |
 | `DUPLICATE_CAPTURE` | DuplicateCaptureRule | CRITICAL |
 | `SETTLEMENT_DISCREPANCY` | SettlementTotalRule, SettlementReconcilerJob | CRITICAL / HIGH |
-| `PROVIDER_REPORT_DISCREPANCY` | ProviderReportMatchRule | HIGH |
-| `UNMATCHED_ORDER` | UnmatchedOrderRule | MEDIUM |
+| `PROVIDER_REPORT_MISMATCH` | ProviderReportMatchRule | HIGH |
 | `ORDER_AMOUNT_MISMATCH` | OrderMatchingService | HIGH |
-| `BANK_AMOUNT_MISMATCH` | BankStatementMatchingService | HIGH |
-| `UNMATCHED_BANK_CREDIT` | BankStatementMatchingService | MEDIUM |
-| `OVERDUE_BANK_CREDIT` | SettlementReconcilerJob | HIGH |
 | `AMOUNT_MISMATCH` | General amount discrepancy checks | MEDIUM |
-| (+ additional types) | Various rules | Various |
+| `MISSING_PAYMENT` | Missing payment detection | HIGH |
+| `UNREGISTERED_PAYMENT` | OrderMatchingService (no order found) | MEDIUM |
+| `STATUS_MISMATCH` | Status inconsistency checks | MEDIUM |
+| `FEE_DISCREPANCY` | Fee verification | MEDIUM |
+| `BANK_AMOUNT_MISMATCH` | BankStatementMatchingService | CRITICAL |
+| `UNMATCHED_BANK_CREDIT` | BankStatementCatchUpJob | MEDIUM |
+| `OVERDUE_BANK_CREDIT` | BankStatementCatchUpJob, SettlementReconcilerJob | HIGH |
 
 ### Exception lifecycle
 
@@ -835,7 +1010,7 @@ X-Actor: ops-engineer-1
 
 ---
 
-## 15. Settlement Reconciliation
+## 17. Settlement Reconciliation
 
 Settlements represent the bank transfer from Razorpay or Stripe to the merchant. Each settlement groups multiple transactions. A settlement also carries a detailed line-item report (`SettlementReportLine`) from the provider.
 
@@ -851,7 +1026,7 @@ Settlements represent the bank transfer from Razorpay or Stripe to the merchant.
 | `bankCreditAmount` | Amount actually credited to bank |
 | `bankCreditDate` | Date of bank credit |
 | `utrNumber` | UTR reference for bank transfer |
-| `settlementStatus` | `PENDING → SETTLED → MATCHED_TO_BANK` or `DISCREPANT` |
+| `settlementStatus` | `PENDING → SETTLED → MATCHED_TO_BANK` or `DISCREPANT` or `ON_HOLD` |
 | `transactionCount` | Expected number of transactions in this settlement |
 
 ### SettlementReportLine entity
@@ -866,7 +1041,7 @@ Each settlement carries individual line items that correspond to specific transa
 | `grossAmount` | Gross amount for this line |
 | `feeAmount` | Fee for this line |
 | `netAmount` | Net for this line |
-| `matchStatus` | `PENDING → MATCHED / UNMATCHED` |
+| `matchStatus` | `PENDING → MATCHED / AMOUNT_MISMATCH / NOT_FOUND_IN_DB` |
 | `matchedToTxnId` | FK to matched `Transaction` (set by ProviderReportMatchRule) |
 
 ### Settlement status flow
@@ -874,7 +1049,9 @@ Each settlement carries individual line items that correspond to specific transa
 ```
 PENDING  ──►  SETTLED  ──►  MATCHED_TO_BANK  (SettlementReconcilerJob closes cleanly)
                   │
-                  └──►  DISCREPANT           (SettlementTotalRule: amount mismatch)
+                  ├──►  DISCREPANT           (SettlementTotalRule: amount mismatch)
+                  │
+                  └──►  ON_HOLD              (manual hold)
 ```
 
 ### SettlementService.saveAndMatch()
@@ -892,17 +1069,32 @@ This job runs independently of the main ReconciliationEngine and handles two res
 - If open exceptions exist → leave as `SETTLED`, log warning
 
 **Phase 2 — Flag overdue pending settlements:**
-- Find settlements with `status = PENDING` AND `createdAt < now - 7 days` (configurable)
-- For each not already flagged, create a `SETTLEMENT_DISCREPANCY` or `OVERDUE_BANK_CREDIT` exception (HIGH severity) describing how many days it has been pending
+- Find settlements with `status = PENDING` AND `createdAt < now - 7 days` (configurable via `app.reconciliation.settlement-overdue-days`)
+- For each not already flagged, create a `SETTLEMENT_DISCREPANCY` exception (HIGH severity) describing how many days it has been pending
 - Prevents long-pending settlements from going unnoticed
 
 The job can also be triggered manually via `POST /api/v1/admin/settlement-reconciler/run`.
 
+### SettlementReportSyncJob (every 2 hours)
+
+Syncs provider settlement report lines for all `SETTLED` or `DISCREPANT` Razorpay settlements. For each settlement, fetches payment details by settlement ID from Razorpay and creates `SettlementReportLine` records. These are then verified by `ProviderReportMatchRule`.
+
 ---
 
-## 16. Bank Statement Matching
+## 18. Bank Statement Matching
 
 Bank statement entries represent individual credit/debit lines uploaded from the merchant's bank portal. The platform matches these entries to provider settlements using a three-pass strategy. This closes the full reconciliation loop: webhook → transaction → settlement → bank.
+
+### Upload via CSV
+
+```
+POST /api/v1/bank-statements/upload
+Content-Type: multipart/form-data
+  file: bank_statement.csv
+  currency: INR (optional, default INR)
+```
+
+The CSV is parsed by `BankStatementIngestionService`. Each row creates a `BankStatementEntry` record. The narration field is scanned for payment gateway keywords (RAZORPAY, STRIPE, CASHFREE, PAYU) to set the `providerHint`.
 
 ### BankStatementEntry entity
 
@@ -924,17 +1116,17 @@ Bank statement entries represent individual credit/debit lines uploaded from the
 
 ### Three-pass matching strategy
 
-`BankStatementMatchingService` attempts three passes in order, stopping as soon as a match is found.
+`BankStatementMatchingService` attempts three passes in order, stopping as soon as a match is found. Only `CR` (credit) entries from payment gateway narrations are considered for matching.
 
 #### Pass 1 — UTR Match (Confidence: 100%)
 
 ```
 if entry.utrNumber is not blank:
-    find Settlement where utrNumber = entry.utrNumber AND merchantId matches
+    find Settlement where utrNumber = entry.utrNumber AND status = SETTLED
     found → mark MATCHED, matchedBy = UTR
-             check amount: |settlement.bankCreditAmount - entry.amount| > tolerance?
-               yes → create BANK_AMOUNT_MISMATCH exception (HIGH severity)
-               no  → link and close
+             check amount: |settlement.netAmount - entry.amount| > tolerance?
+               yes → mark UNMATCHED, create BANK_AMOUNT_MISMATCH exception (CRITICAL)
+               no  → update settlement to MATCHED_TO_BANK, set bankCreditAmount/Date
 ```
 
 UTR (Unique Transaction Reference) is the definitive identifier for an NEFT/IMPS bank transfer. A UTR match is conclusive.
@@ -947,7 +1139,7 @@ if entry is still PENDING:
         status = SETTLED
         netAmount within ±500 paisa of entry.amount
         settledAt within ±1 day of entry.entryDate
-        providerHint matches narration (if hint available)
+    filter by providerHint matching narration (if hint available)
     single result → mark MATCHED, matchedBy = AMOUNT_DATE
     multiple results → ambiguous, leave PENDING (will retry in BankStatementCatchUpJob)
 ```
@@ -956,7 +1148,8 @@ if entry is still PENDING:
 
 ```
 if entry is still PENDING:
-    parse narration for a known providerSettlementId pattern
+    parse narration for known patterns:
+        "RAZORPAY*SETTLEMENT*setl_ABC" or "SETL_" prefix
     find Settlement by parsedSettlementId
     found → mark MATCHED, matchedBy = NARRATION
 ```
@@ -967,13 +1160,17 @@ if entry is still PENDING:
 - **`tryMatchBySettlement(settlement)`** — Called retroactively when a settlement is saved (covers entries that arrived before the settlement)
 - **`rematchPending()`** — Called by `BankStatementCatchUpJob` to retry all `PENDING` entries
 
-### Unmatched entries
+### Unmatched entries and overdue detection
 
-If an entry remains `PENDING` after all three passes and the configured grace window has elapsed (`app.bank-matching.unmatched-entry-grace-hours`, default 48), `ExceptionRecordService.createForBankEntry()` creates an `UNMATCHED_BANK_CREDIT` exception (MEDIUM severity).
+The `BankStatementCatchUpJob` (daily at 9 AM) handles two overdue scenarios:
+
+1. **Unmatched bank credits:** CR entries still `PENDING` after 48 hours (`app.bank-matching.unmatched-entry-grace-hours`) are marked `UNMATCHED` and an `UNMATCHED_BANK_CREDIT` exception (MEDIUM severity) is created.
+
+2. **Settlements without bank confirmation:** Settlements in `SETTLED` status for over 7 days (`app.bank-matching.overdue-settlement-days`) without a corresponding bank statement match trigger an `OVERDUE_BANK_CREDIT` exception (HIGH severity).
 
 ---
 
-## 17. Gap Filler — Polling for Missed Events
+## 19. Gap Filler — Polling for Missed Events
 
 Webhooks can be missed due to network issues, provider outages, or misconfigured endpoints. The Gap Filler job compensates by periodically polling the provider APIs for recent events.
 
@@ -984,16 +1181,24 @@ Compute window:
     from = now - 30 minutes  (configurable: app.polling.gap-filler-lookback-minutes)
     to   = now
 
-Razorpay:
-    fetchPayments(from, to)  ──► paginated Razorpay API call (page size 100)
-    fetchRefunds(from, to)   ──► paginated Razorpay API call
-    each result wrapped in synthetic webhook envelope → ingestAsync(payload, "razorpay", "polling")
+Razorpay (per-merchant):
+    for each active ProviderConnection where provider = "razorpay":
+        decrypt credentials
+        fetchPayments(from, to)  ──► paginated Razorpay API call (page size 100)
+        fetchRefunds(from, to)   ──► paginated Razorpay API call
+        each result wrapped in synthetic webhook envelope
+            → ingestAsync(payload, "razorpay", "polling")
 
-Stripe:
+Stripe (global):
     fetchCharges(from, to)   ──► cursor-paginated Stripe API call (limit 100)
     fetchRefunds(from, to)   ──► cursor-paginated Stripe API call
-    each result wrapped in synthetic webhook envelope → ingestAsync(payload, "stripe", "polling")
+    each result wrapped in synthetic webhook envelope
+        → ingestAsync(payload, "stripe", "polling")
 ```
+
+### Per-merchant polling
+
+For Razorpay, the gap filler iterates all active `ProviderConnection` records, decrypts each merchant's API credentials, and polls using those credentials. This ensures each merchant's events are fetched with the correct API keys.
 
 ### Synthetic envelope format
 
@@ -1030,7 +1235,7 @@ Metrics: `polling.gaps.filled` counter tracks how many events were picked up by 
 
 ---
 
-## 18. Admin Operations
+## 20. Admin Operations
 
 All admin endpoints are under `/api/v1/admin` and require a valid JWT. They accept an `X-Actor` header to identify who triggered the action (used in audit logs).
 
@@ -1059,18 +1264,19 @@ X-Actor: ops-engineer
 {
   "provider": "razorpay",
   "from": "2024-01-15T00:00:00Z",
-  "to": "2024-01-15T23:59:59Z"
+  "to": "2024-01-15T23:59:59Z",
+  "merchantId": "merchant_001"
 }
 ```
 
 Use case: A specific time window had a webhook outage. Trigger a targeted backfill for that window without waiting for the scheduled gap-filler.
 
 **What happens:**
-1. Call `RazorpayPollingService.fetchPayments(from, to)` + `fetchRefunds(from, to)`
-   (or Stripe equivalents for `"stripe"`)
-2. For each fetched payload, call `WebhookIngestionService.ingestAsync(payload, provider, "admin-poll")`
-3. Log audit entry: `action=admin_poll_triggered` with `fetched` count
-4. Return `{"status": "accepted", "provider": "...", "fetched": N, ...}`
+1. For Razorpay: looks up the merchant's stored `ProviderConnection` credentials, decrypts them, and calls `RazorpayPollingService.fetchPayments(from, to)` + `fetchRefunds(from, to)`
+2. For Stripe: calls `StripePollingService.fetchCharges(from, to)` + `fetchRefunds(from, to)` (uses global credentials)
+3. For each fetched payload, call `WebhookIngestionService.ingestAsync(payload, provider, "admin-poll")`
+4. Log audit entry: `action=admin_poll_triggered` with `fetched` count
+5. Return `{"status": "accepted", "provider": "...", "merchantId": "...", "fetched": N, ...}`
 
 ### Manual settlement reconciliation
 
@@ -1079,7 +1285,20 @@ POST /api/v1/admin/settlement-reconciler/run
 X-Actor: ops-engineer
 ```
 
-Triggers `SettlementReconcilerJob.run()` on demand. Returns a summary of what was processed.
+Triggers `SettlementReconcilerJob.run()` on demand. Returns a summary with `closedAsMatched`, `remainedDiscrepant`, and `overdueSettlementsFlagged` counts.
+
+### Batch transaction reconciliation
+
+```
+POST /api/v1/admin/reconcile-transactions
+X-Actor: ops-engineer
+{
+  "transactionIds": [1, 2, 3],
+  "mode": "MARK_MATCHED"
+}
+```
+
+Allows manual batch updates of transaction reconciliation status. Modes: `MARK_MATCHED`, `MARK_EXCEPTION`.
 
 ### Audit log search
 
@@ -1088,9 +1307,19 @@ GET /api/v1/admin/audit-logs?entityType=webhook_event&entityId=1234
 GET /api/v1/admin/audit-logs?actor=ops-engineer
 ```
 
+### Payment flow event search
+
+```
+GET /api/v1/admin/payment-flow-events?providerTransactionId=pay_ABC&limit=50
+GET /api/v1/admin/payment-flow-events?webhookEventId=1234
+GET /api/v1/admin/payment-flow-events?userId=42
+```
+
+Traces the lifecycle of a transaction through every processing stage for debugging.
+
 ---
 
-## 19. Dashboard and Metrics
+## 21. Dashboard and Metrics
 
 ### Summary endpoint
 
@@ -1116,15 +1345,38 @@ Returns a comprehensive summary for the given look-back window:
 GET /api/v1/dashboard/metrics
 ```
 
-Returns:
+Returns 30-day aggregate metrics:
 
 | Key | Description |
 |---|---|
-| `transactionsProcessed` | All-time transaction count |
+| `transactionsProcessed` | Transaction count in last 30 days |
 | `openExceptions` | Open + in-review exception count |
-| `matchRate` | All-time match rate |
+| `matchRate` | 30-day match rate |
 | `webhookQueueDepth` | Currently 0 (placeholder for future queue depth metric) |
 | `status` | Always `"ok"` |
+
+### Activity endpoint
+
+```
+GET /api/v1/dashboard/activity?limit=8
+```
+
+Returns a merged, time-sorted activity feed combining recent transactions and exceptions. Each item includes `time`, `text` (summary), `subtext` (detail), and `type` (transaction or exception).
+
+### Trends endpoint
+
+```
+GET /api/v1/dashboard/trends?days=7
+```
+
+Returns daily time-series data:
+
+| Key | Description |
+|---|---|
+| `date` | Calendar date (ISO format) |
+| `matched` | Count of matched transactions that day |
+| `exceptions` | Count of exceptions created that day |
+| `transactions` | Total transaction count that day |
 
 ### Prometheus metrics (Micrometer)
 
@@ -1138,7 +1390,7 @@ Available at `GET /actuator/prometheus`:
 
 ---
 
-## 20. Audit Logging
+## 22. Audit Logging
 
 `AuditService.log()` creates an immutable `AuditLog` record for every sensitive operation.
 
@@ -1167,23 +1419,23 @@ Available at `GET /actuator/prometheus`:
 
 ---
 
-## 21. Scheduled Jobs Summary
+## 23. Scheduled Jobs Summary
 
 All jobs use [db-scheduler](https://github.com/kagkarlsson/db-scheduler), a persistent distributed scheduler backed by a PostgreSQL table (`scheduled_tasks`). This ensures that in a multi-instance deployment, each job runs exactly once.
 
 | Job | Schedule | Purpose |
 |---|---|---|
 | `ReconciliationJob` | Every 5 minutes | Runs all reconciliation rules |
-| `GapFillerJob` | Every 15 minutes | Polls Razorpay + Stripe for missed events |
+| `GapFillerJob` | Every 15 minutes | Polls Razorpay (per-merchant) + Stripe for missed events |
 | `SettlementReconcilerJob` | Daily at 2 AM | Closes settled settlements; flags overdue pending ones |
-| `SettlementReportSyncJob` | Configurable cron | Syncs provider settlement report lines into `settlement_report_lines` |
-| `BankStatementCatchUpJob` | Configurable | Retries matching for all `PENDING` bank statement entries |
+| `SettlementReportSyncJob` | Every 2 hours | Syncs provider settlement report lines into `settlement_report_lines` |
+| `BankStatementCatchUpJob` | Daily at 9 AM | Retries matching for `PENDING` bank entries; flags overdue entries and settlements |
 
 ---
 
-## 22. Data Model
+## 24. Data Model
 
-Flyway manages 13 versioned migrations (V1–V13). All primary keys are `bigint GENERATED ALWAYS AS IDENTITY`. All timestamps are `timestamptz` stored in UTC.
+Flyway manages 18 versioned migrations (V1–V18). All primary keys are `bigint GENERATED ALWAYS AS IDENTITY`. All timestamps are `timestamptz` stored in UTC.
 
 ### Table: `webhook_events`
 
@@ -1200,6 +1452,7 @@ Flyway manages 13 versioned migrations (V1–V13). All primary keys are `bigint 
 | `processing_error` | text | Error message if processing failed |
 | `source` | varchar(30) | `webhook`, `polling`, `admin-poll` |
 | `signature_valid` | boolean | Always true (verified before saving) |
+| `merchant_id` | varchar(60) | Resolved from webhook signature |
 
 ### Table: `transactions`
 
@@ -1252,8 +1505,8 @@ Flyway manages 13 versioned migrations (V1–V13). All primary keys are `bigint 
 | `currency` | char(3) | |
 | `order_status` | enum | `CREATED`, `PAYMENT_RECEIVED`, `OVERPAID`, `UNDERPAID`, `CANCELLED`, `REFUNDED` |
 | `transaction_id` | bigint FK | Matched transaction (nullable) |
-| `amount_matched` | bigint | Actual amount received |
-| `discrepancy_amount` | bigint | `amount_matched - expected_amount` |
+| `amount_matched` | boolean | Whether amounts matched within tolerance |
+| `discrepancy_amount` | bigint | `actual - expected` amount |
 | `metadata` | jsonb | Arbitrary merchant metadata |
 | `matched_at` | timestamptz | When match was found |
 | `created_at` | timestamptz | |
@@ -1283,12 +1536,28 @@ Flyway manages 13 versioned migrations (V1–V13). All primary keys are `bigint 
 |---|---|---|
 | `id` | bigint PK | |
 | `merchant_id` | varchar(60) | UNIQUE |
-| `name` | varchar | Display name |
-| `email` | varchar | UNIQUE |
-| `api_key_hash` | varchar | Hashed API key for merchant authentication |
-| `webhook_secret` | varchar | Per-merchant webhook signing secret |
-| `status` | varchar | Merchant account status |
+| `name` | varchar(120) | Display name |
+| `email` | varchar(254) | UNIQUE |
+| `api_key_hash` | varchar(256) | BCrypt hash of API key |
+| `password_hash` | varchar(256) | BCrypt hash of password (optional) |
+| `webhook_secret` | varchar(256) | Per-merchant webhook signing secret |
+| `status` | varchar(20) | Merchant account status (default `ACTIVE`) |
 | `created_at` | timestamptz | |
+| `updated_at` | timestamptz | |
+
+### Table: `provider_connections`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | bigint PK | |
+| `merchant_id` | varchar(60) | UNIQUE with provider |
+| `provider` | varchar(30) | `razorpay` or `stripe` |
+| `api_key_encrypted` | text | AES-encrypted API key |
+| `secret_encrypted` | text | AES-encrypted API secret |
+| `api_key_masked` | varchar | First 4 + `****` + last 4 (for display) |
+| `status` | enum | `ACTIVE` or `DISABLED` |
+| `created_at` | timestamptz | |
+| `updated_at` | timestamptz | |
 
 ### Table: `settlements`
 
@@ -1323,7 +1592,7 @@ Flyway manages 13 versioned migrations (V1–V13). All primary keys are `bigint 
 | `fee_amount` | bigint | |
 | `net_amount` | bigint | |
 | `currency` | char(3) | |
-| `match_status` | enum | `PENDING`, `MATCHED`, `UNMATCHED` |
+| `match_status` | enum | `PENDING`, `MATCHED`, `AMOUNT_MISMATCH`, `NOT_FOUND_IN_DB` |
 | `matched_to_txn_id` | bigint FK | Matched transaction (nullable) |
 
 ### Table: `bank_statement_entries`
@@ -1394,7 +1663,7 @@ Flyway manages 13 versioned migrations (V1–V13). All primary keys are `bigint 
 
 ---
 
-## 23. API Reference
+## 25. API Reference
 
 ### Webhook endpoints (public — no JWT required)
 
@@ -1405,12 +1674,33 @@ Flyway manages 13 versioned migrations (V1–V13). All primary keys are `bigint 
 
 Both return `200 "received"` on success, `400 "Invalid signature"` on failure.
 
+### Merchant Self-Service (public registration + login; JWT for others)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/api/v1/merchants/register` | None | Register merchant, returns API key (one-time) |
+| POST | `/api/v1/merchants/login` | None | Email + password login, returns JWT |
+| POST | `/api/v1/merchants/auth` | None | API key auth, returns JWT |
+| POST | `/api/v1/merchants/reset-key` | None | Reset API key, returns new key (one-time) |
+| POST | `/api/v1/merchants/refresh` | JWT | Refresh JWT token |
+| POST | `/api/v1/merchants/set-password` | JWT | Set or update password |
+| GET | `/api/v1/merchants/me` | JWT | Get merchant profile |
+
+### Provider Connections
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/v1/connections` | JWT | List connections (masked credentials) |
+| POST | `/api/v1/connections` | JWT | Save/update provider connection |
+
 ### Dashboard
 
 | Method | Path | Params | Description |
 |---|---|---|---|
 | GET | `/api/v1/dashboard/summary` | `days` (default 7) | Transaction and exception summary |
-| GET | `/api/v1/dashboard/metrics` | — | Real-time metrics |
+| GET | `/api/v1/dashboard/metrics` | — | 30-day aggregate metrics |
+| GET | `/api/v1/dashboard/activity` | `limit` (default 8) | Merged activity feed |
+| GET | `/api/v1/dashboard/trends` | `days` (default 7) | Daily time-series data |
 
 ### Exceptions
 
@@ -1424,7 +1714,7 @@ Both return `200 "received"` on success, `400 "Invalid signature"` on failure.
 
 | Method | Path | Params | Description |
 |---|---|---|---|
-| GET | `/api/v1/transactions` | `provider`, `status`, `from`, `to`, `page`, `limit` | List transactions |
+| GET | `/api/v1/transactions` | `provider`, `status`, `orderId`, `from`, `to`, `page`, `limit` | List transactions |
 | GET | `/api/v1/transactions/{id}` | — | Transaction detail |
 
 ### Orders
@@ -1447,73 +1737,48 @@ Both return `200 "received"` on success, `400 "Invalid signature"` on failure.
 
 | Method | Path | Params / Body | Description |
 |---|---|---|---|
-| POST | `/api/v1/bank-statements/upload` | `{merchantId, entries: [...]}` | Upload bank statement rows; triggers immediate matching |
-| GET | `/api/v1/bank-statements` | `merchantId`, `matchStatus`, `page`, `limit` | List bank statement entries |
-
-### Merchants
-
-| Method | Path | Params / Body | Description |
-|---|---|---|---|
-| POST | `/api/v1/merchants` | `{name, email, merchantId}` | Register a new merchant |
-| GET | `/api/v1/merchants/{merchantId}` | — | Get merchant details |
-| PATCH | `/api/v1/merchants/{merchantId}` | `{status, ...}` | Update merchant |
+| POST | `/api/v1/bank-statements/upload` | Multipart: `file` (CSV), `currency` (default INR) | Upload bank statement CSV; triggers immediate matching |
+| GET | `/api/v1/bank-statements` | `status`, `page`, `limit` | List bank statement entries with summary |
 
 ### Admin (requires JWT + `X-Actor` header)
 
-| Method | Path | Body | Description |
+| Method | Path | Body / Params | Description |
 |---|---|---|---|
 | POST | `/api/v1/admin/replay` | `{webhookEventId}` | Replay a failed webhook event |
-| POST | `/api/v1/admin/poll` | `{provider, from, to}` | Backfill events for a time window |
+| POST | `/api/v1/admin/poll` | `{provider, from, to, merchantId}` | Backfill events for a time window |
 | POST | `/api/v1/admin/settlement-reconciler/run` | — | Manually trigger settlement reconciler |
+| POST | `/api/v1/admin/reconcile-transactions` | `{transactionIds, mode}` | Batch reconcile transactions |
 | GET | `/api/v1/admin/audit-logs` | `entityType`, `entityId`, `actor` | Search audit logs |
+| GET | `/api/v1/admin/payment-flow-events` | `providerTransactionId`, `webhookEventId`, `userId`, `limit` | Trace payment lifecycle |
 
 ---
 
-## 24. Configuration Reference
+## 26. Configuration Reference
 
 All configuration is in `src/main/resources/application.yml`. Secrets come from environment variables.
 
 ```yaml
-app:
-  merchant:
-    id: ${MERCHANT_ID:merchant_001}             # Default merchant ID
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/reconciliation_dev}
+    username: ${DB_USERNAME:recon_user}
+    password: ${DB_PASSWORD:recon_pass}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
 
-  razorpay:
-    key-id: ${RAZORPAY_KEY_ID}                  # Razorpay API key for polling
-    key-secret: ${RAZORPAY_KEY_SECRET}          # Razorpay API secret for polling
-    webhook-secret: ${RAZORPAY_WEBHOOK_SECRET}  # Used to verify webhook signatures
-
-  stripe:
-    secret-key: ${STRIPE_SECRET_KEY}            # Stripe API key for polling
-    webhook-secret: ${STRIPE_WEBHOOK_SECRET}    # Used to verify webhook signatures
-
-  jwt:
-    secret: ${JWT_SECRET}                       # HMAC secret for signing JWTs
-    expiry-hours: 24
-
-  reconciliation:
-    run-interval-minutes: 5                     # How often ReconciliationJob runs
-    missing-capture-threshold-hours: 24         # Threshold for MissingCaptureRule
-    amount-tolerance-paisa: 100                 # Tolerance for SettlementTotalRule (₹1)
-    settlement-overdue-days: 7                  # Threshold for SettlementReconcilerJob Phase 2
-
-  order-matching:
-    amount-tolerance-paisa: 100                 # Tolerance for order amount comparison (₹1)
-    payment-grace-minutes: 30                   # How long to wait for payment after order
-    order-grace-minutes: 15                     # How long to wait for order after payment
-
-  bank-matching:
-    amount-tolerance-paisa: 500                 # Tolerance for bank amount comparison (₹5)
-    unmatched-entry-grace-hours: 48             # Grace before raising UNMATCHED_BANK_CREDIT
-    overdue-settlement-days: 7                  # Grace before raising OVERDUE_BANK_CREDIT
-
-  polling:
-    gap-filler-interval-minutes: 15             # How often GapFillerJob runs
-    gap-filler-lookback-minutes: 30             # How far back GapFillerJob looks
-    settlement-reconciler-cron: "0 0 2 * * *"  # Daily at 2 AM
-
-  encryption:
-    key: ${APP_ENCRYPTION_KEY}                  # AES key for EncryptionService
+server:
+  port: ${PORT:8080}
 
 db-scheduler:
   enabled: true
@@ -1521,6 +1786,47 @@ db-scheduler:
   polling-interval: 10s
   heartbeat-interval: 5m
   table-name: scheduled_tasks
+
+app:
+  merchant:
+    id: ${MERCHANT_ID:merchant_001}
+
+  razorpay:
+    key-id: ${RAZORPAY_KEY_ID}
+    key-secret: ${RAZORPAY_KEY_SECRET}
+    webhook-secret: ${RAZORPAY_WEBHOOK_SECRET}
+
+  stripe:
+    secret-key: ${STRIPE_SECRET_KEY}
+    webhook-secret: ${STRIPE_WEBHOOK_SECRET}
+
+  jwt:
+    secret: ${JWT_SECRET}
+    expiry-hours: 24
+
+  reconciliation:
+    run-interval-minutes: 5
+    missing-capture-threshold-hours: 24
+    amount-tolerance-paisa: 100
+    settlement-overdue-days: 7
+
+  order-matching:
+    amount-tolerance-paisa: 100
+    payment-grace-minutes: 30
+    order-grace-minutes: 15
+
+  bank-matching:
+    amount-tolerance-paisa: 500
+    unmatched-entry-grace-hours: 48
+    overdue-settlement-days: 7
+
+  polling:
+    gap-filler-interval-minutes: 15
+    gap-filler-lookback-minutes: 30
+    settlement-reconciler-cron: "0 0 2 * * *"
+
+  encryption:
+    key: ${APP_ENCRYPTION_KEY}
 ```
 
 ### Environment variables required in production
@@ -1530,18 +1836,37 @@ db-scheduler:
 | `DB_URL` | PostgreSQL JDBC URL |
 | `DB_USERNAME` | Database user |
 | `DB_PASSWORD` | Database password |
-| `RAZORPAY_KEY_ID` | Razorpay API key (for polling) |
-| `RAZORPAY_KEY_SECRET` | Razorpay API secret (for polling) |
-| `RAZORPAY_WEBHOOK_SECRET` | Webhook HMAC secret |
+| `RAZORPAY_KEY_ID` | Default Razorpay API key (for polling without per-merchant creds) |
+| `RAZORPAY_KEY_SECRET` | Default Razorpay API secret |
+| `RAZORPAY_WEBHOOK_SECRET` | Default webhook HMAC secret (fallback when no merchant match) |
 | `STRIPE_SECRET_KEY` | Stripe API key (for polling) |
 | `STRIPE_WEBHOOK_SECRET` | Webhook HMAC secret |
-| `JWT_SECRET` | JWT signing key |
-| `APP_ENCRYPTION_KEY` | AES encryption key |
+| `JWT_SECRET` | JWT signing key (must be ≥32 chars for HS256) |
+| `APP_ENCRYPTION_KEY` | AES encryption key (for ProviderConnection credentials) |
 | `MERCHANT_ID` | Default merchant identifier |
+| `PORT` | Server port (default 8080) |
+| `SPRING_PROFILES_ACTIVE` | `local` or `prod` |
+
+### Docker
+
+**Build and run:**
+```bash
+docker build -t reconciliation:latest .
+docker run -p 8080:8080 \
+  -e DB_URL=jdbc:postgresql://host:5433/reconciliation_dev \
+  -e JWT_SECRET=your-secret \
+  reconciliation:latest
+```
+
+**Docker Compose (local development):**
+```bash
+docker compose up -d
+```
+Starts PostgreSQL 16 on port 5433 and PgAdmin on port 5050.
 
 ---
 
-## 25. Testing Strategy
+## 27. Testing Strategy
 
 ### Test philosophy
 
@@ -1559,6 +1884,8 @@ All existing tests are unit tests using Mockito mocks. There is no in-memory dat
 | `NormalizationServiceTest` | Razorpay and Stripe payloads produce correct canonical Transaction fields |
 | `TransactionServiceTest` | Upsert insert path; upsert merge path (newer wins); upsert skip path (older loses); same-time non-advancing status ignored |
 | `OrderMatchingServiceTest` | Match on capture — exact, overpaid, underpaid; match on order creation; amount tolerance boundaries |
+| `OrderControllerTest` | Order CRUD endpoint tests |
+| `TransactionControllerTest` | Transaction query endpoint tests |
 | `BankStatementMatchingServiceTest` | Pass 1 UTR match; Pass 2 amount+date match; Pass 3 narration parse; amount mismatch on UTR match creates exception |
 | `ReconciliationEngineTest` | One rule failing does not block subsequent rules |
 | `RuleBehaviorTest` | All 7 rules: candidate detection + exception creation + deduplication |
@@ -1567,6 +1894,8 @@ All existing tests are unit tests using Mockito mocks. There is no in-memory dat
 | `AdminPollToIngestionIntegrationTest` | Full chain: AdminService → real WebhookIngestionService → repo + processingService. Verifies event saved with correct source and provider. Tests deduplication in the chain. |
 | `SettlementReconcilerJobTest` | Phase 1: MATCHED_TO_BANK when no exceptions; stays SETTLED when exceptions open. Phase 2: creates exception for overdue; skips already-flagged. Mixed batch; audit always called. |
 | `ExceptionQueryServiceTest` | list() window filter; status filter; type filter; pagination; summary counts. detail() with and without linked transaction. update() for each terminal status (RESOLVED, IGNORED sets resolvedAt). |
+| `FullFlowMockIntegrationTest` | End-to-end payment flow integration |
+| `MerchantRazorpayBankStatementFlowIntegrationTest` | Full merchant → Razorpay webhook → bank statement matching flow |
 
 ### Running tests
 

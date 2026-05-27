@@ -6,6 +6,7 @@ import com.reconciliation.exception_record.entity.ExceptionRecord;
 import com.reconciliation.exception_record.repository.ExceptionRecordRepository;
 import com.reconciliation.transaction.entity.Transaction;
 import com.reconciliation.transaction.repository.TransactionRepository;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.Comparator;
 import java.util.List;
@@ -23,15 +24,17 @@ public class ExceptionQueryService {
     private final AuditService auditService;
 
     public Map<String, Object> list(
-            Integer days,
+            LocalDate fromDate,
+            LocalDate toDate,
             String provider,
             String type,
             String status,
             int page,
             int limit) {
-        OffsetDateTime from = OffsetDateTime.now().minusDays(days == null ? 7 : days);
+        OffsetDateTime from = fromDate.atStartOfDay().atOffset(OffsetDateTime.now().getOffset());
+        OffsetDateTime to = toDate.plusDays(1).atStartOfDay().atOffset(OffsetDateTime.now().getOffset());
         List<ExceptionRecord> filtered = exceptionRecordRepository.findAll().stream()
-                .filter(ex -> ex.getDetectedAt() != null && !ex.getDetectedAt().isBefore(from))
+                .filter(ex -> ex.getDetectedAt() != null && !ex.getDetectedAt().isBefore(from) && ex.getDetectedAt().isBefore(to))
                 .filter(ex -> type == null || ex.getExceptionType().name().equalsIgnoreCase(type))
                 .filter(ex -> status == null || ex.getStatus().name().equalsIgnoreCase(status))
                 .filter(ex -> provider == null || matchesProvider(ex, provider))

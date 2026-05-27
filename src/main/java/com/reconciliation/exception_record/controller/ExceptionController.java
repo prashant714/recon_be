@@ -3,8 +3,10 @@ package com.reconciliation.exception_record.controller;
 import com.reconciliation.exception_record.entity.ExceptionRecord;
 import com.reconciliation.exception_record.service.ExceptionQueryService;
 import jakarta.servlet.http.HttpServletRequest;
+import java.time.LocalDate;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -24,13 +26,16 @@ public class ExceptionController {
 
     @GetMapping
     public ResponseEntity<Map<String, Object>> listExceptions(
-            @RequestParam(defaultValue = "7")    int    days,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate fromDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate toDate,
             @RequestParam(required = false)      String status,
             @RequestParam(required = false)      String provider,
             @RequestParam(required = false)      String type,
             @RequestParam(defaultValue = "0")    int    page,
             @RequestParam(defaultValue = "50")   int    limit) {
-        return ResponseEntity.ok(exceptionQueryService.list(days, provider, type, status, page, limit));
+        LocalDate to = toDate != null ? toDate : LocalDate.now();
+        LocalDate from = fromDate != null ? fromDate : to.minusDays(7);
+        return ResponseEntity.ok(exceptionQueryService.list(from, to, provider, type, status, page, limit));
     }
 
     @GetMapping("/{id}")
