@@ -50,6 +50,9 @@ public class Merchant {
     @Builder.Default
     private String status = "ACTIVE";
 
+    @Column(name = "last_bank_statement_upload_at")
+    private OffsetDateTime lastBankStatementUploadAt;
+
     @Column(name = "created_at", nullable = false)
     private OffsetDateTime createdAt;
 

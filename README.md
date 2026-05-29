@@ -66,7 +66,7 @@ This platform:
 | Language | Java 21 | Uses virtual threads, switch expressions |
 | Framework | Spring Boot 3.2.12 | Web, Security, JPA, Actuator |
 | Database | PostgreSQL 16 | All tables use identity columns |
-| Migrations | Flyway | V1–V18 migrations, runs on startup |
+| Migrations | Flyway | V1–V19 migrations, runs on startup |
 | Scheduling | db-scheduler 14 | Distributed scheduler backed by PostgreSQL — safe for multi-instance deployments |
 | Async | Spring `@Async` with virtual threads | Java 21 virtual threads enabled via `AsyncConfig` |
 | Auth | JWT (jjwt 0.12.5) | Stateless; merchant and admin token types; webhook endpoints are public |
@@ -186,10 +186,14 @@ src/main/java/com/reconciliation/
 │   └── service/                     # OrderService, OrderMatchingService
 │
 ├── bank/                            # Bank statement reconciliation
-│   ├── controller/BankStatementController.java
-│   ├── entity/BankStatementEntry.java
-│   ├── repository/BankStatementEntryRepository.java
-│   └── service/BankStatementMatchingService.java
+│   ├── controller/                  # BankStatementController,
+│   │                                # ReconciliationBankStatementController
+│   ├── entity/                      # BankStatementEntry, BankStatementUpload
+│   ├── repository/                  # BankStatementEntryRepository,
+│   │                                # BankStatementUploadRepository
+│   └── service/                     # BankStatementIngestionService (CSV/TSV parser),
+│                                    # BankStatementMatchingService (3-pass matching),
+│                                    # BankStatementUploadService (upload lifecycle)
 │
 ├── merchant/                        # Merchant account management
 │   ├── controller/MerchantController.java
@@ -353,6 +357,7 @@ The platform supports multi-tenant operation with self-service merchant registra
 | `passwordHash` | varchar(256) | BCrypt hash of login password (optional) |
 | `webhookSecret` | varchar(256) | Per-merchant webhook signing secret |
 | `status` | varchar(20) | Default `"ACTIVE"` |
+| `lastBankStatementUploadAt` | timestamptz | Updated on each successful bank statement upload |
 | `createdAt` | timestamptz | Auto-set on create |
 | `updatedAt` | timestamptz | Auto-set on create/update |
 
@@ -987,7 +992,7 @@ When status transitions to `RESOLVED` or `IGNORED`, `resolvedAt` and `resolvedBy
 All requests route through `ExceptionController` → `ExceptionQueryService`.
 
 **GET `/api/v1/exceptions`** — List exceptions with filters:
-- `days` (default 7) — look-back window
+- `fromDate`, `toDate` — date range (ISO format, e.g. `2026-05-01`)
 - `status` — filter by `OPEN`, `IN_REVIEW`, `RESOLVED`, `IGNORED`
 - `provider` — filter by provider (resolved via linked transaction)
 - `type` — filter by exception type
@@ -1085,16 +1090,56 @@ Syncs provider settlement report lines for all `SETTLED` or `DISCREPANT` Razorpa
 
 Bank statement entries represent individual credit/debit lines uploaded from the merchant's bank portal. The platform matches these entries to provider settlements using a three-pass strategy. This closes the full reconciliation loop: webhook → transaction → settlement → bank.
 
-### Upload via CSV
+### Upload Flow
+
+The platform provides two upload endpoints:
+
+| Endpoint | Controller | Purpose |
+|---|---|---|
+| `POST /api/v1/bank-statements/upload` | BankStatementController | Direct CSV upload + immediate matching |
+| `POST /api/v1/reconciliation/bank-statements/upload` | ReconciliationBankStatementController | Upload with tracking (status, progress, re-reconcile) |
+
+The reconciliation controller also provides:
+- `GET /api/v1/reconciliation/bank-statements` — List recent uploads with status
+- `GET /api/v1/reconciliation/bank-statements/{uploadId}` — Get upload status and match counts
+- `POST /api/v1/reconciliation/bank-statements/{uploadId}/reconcile` — Re-trigger matching for an upload
+
+### CSV/TSV Parsing — Multi-Bank Support
+
+`BankStatementIngestionService` parses bank statement files with **smart header detection** that works across all major Indian banks without any per-bank configuration.
+
+**How it works:**
+
+1. **Auto-detect delimiter** — Tabs (TSV) or commas (CSV) are detected per-line
+2. **Smart header detection** — Scans lines for the one containing both a date keyword and an amount keyword (e.g., `Date` + `Credit`). All lines before it are skipped as metadata (account holder info, balances, IFSC codes, etc.)
+3. **Footer detection** — After 3 consecutive parse failures following valid data rows, parsing stops (skips statement summaries and disclaimers)
+4. **Flexible column mapping** — Recognizes multiple header name variants per field
+5. **UTR extraction from narration** — When no dedicated UTR column exists (e.g., ICICI), extracts UTR from narration text using pattern matching (e.g., `NEFT/UTR20260501001/RAZORPAY`)
+
+**Supported date formats:** `dd/MM/yyyy`, `dd-MM-yyyy`, `yyyy-MM-dd`, `dd-MMM-yyyy`, `MM/dd/yyyy`
+
+**Supported banks and column mapping:**
+
+| Field | HDFC | ICICI | SBI | Axis | Internal TSV |
+|---|---|---|---|---|---|
+| Date | `Date`, `Value Date` | `Transaction Date` | `Txn Date` | `Tran Date` | `entryDate` |
+| Amount | `Deposit Amt` / `Withdrawal Amt` | `Credit` / `Debit` | `Credit` / `Debit` | `Credit` / `Debit` | `amount` + `creditDebit` |
+| Narration | `Narration` | `Description` | `Details` | `Particulars` | `narration` |
+| UTR/Ref | `Chq/Ref No` | from narration | `Ref No/Cheque No` | `Chq No` | `utrNumber` |
+
+**Example: Real SBI statement from YONO app**
 
 ```
-POST /api/v1/bank-statements/upload
-Content-Type: multipart/form-data
-  file: bank_statement.csv
-  currency: INR (optional, default INR)
+Mr. SHREYA MISHRA                          ← metadata (skipped)
+State Bank of India                        ← metadata (skipped)
+Account Number : XXXXXXXXX                 ← metadata (skipped)
+Statement From : 01-05-2026 to 29-05-2026  ← metadata (skipped)
+Date,Details,Ref No/Cheque No,Debit,Credit,Balance    ← header (detected)
+01/05/2026,NEFT RAZORPAY SETTLEMENT,UTR20260501001,,488000.00,1500000  ← data
+...
+Statement Summary : 01-05-2026 To 29-05-2026   ← footer (stopped)
+Please do not share your ATM PIN...             ← footer (stopped)
 ```
-
-The CSV is parsed by `BankStatementIngestionService`. Each row creates a `BankStatementEntry` record. The narration field is scanned for payment gateway keywords (RAZORPAY, STRIPE, CASHFREE, PAYU) to set the `providerHint`.
 
 ### BankStatementEntry entity
 
@@ -1103,33 +1148,60 @@ The CSV is parsed by `BankStatementIngestionService`. Each row creates a `BankSt
 | `merchantId` | Owner merchant |
 | `uploadBatchId` | Groups entries from a single upload |
 | `entryDate` | Date of the bank transaction |
-| `amount` | Amount in smallest currency unit |
+| `amount` | Amount in smallest currency unit (paisa) |
 | `currency` | Currency code |
 | `creditDebit` | `CR` (credit) or `DR` (debit) |
-| `utrNumber` | UTR reference on bank statement |
+| `utrNumber` | UTR reference (from column or extracted from narration) |
 | `bankReference` | Bank's internal reference |
 | `narration` | Free-text description from the bank |
-| `providerHint` | Hint parsed from narration (e.g. `"razorpay"`) |
+| `providerHint` | Provider inferred from narration (e.g. `"razorpay"`) |
 | `matchStatus` | `PENDING → MATCHED / UNMATCHED / IGNORED` |
 | `matchedBy` | Matching strategy used: `UTR`, `AMOUNT_DATE`, or `NARRATION` |
 | `matchedSettlementId` | FK to matched `Settlement` |
 
+### BankStatementUpload entity (upload tracking)
+
+| Field | Description |
+|---|---|
+| `uploadId` | Unique upload identifier (e.g. `bsu_e5ce45f92a78`) |
+| `merchantId` | Owner merchant |
+| `fileName` | Original uploaded file name |
+| `status` | `ACCEPTED → PROCESSING → COMPLETED / FAILED` |
+| `rowsParsed` | Total rows successfully parsed |
+| `matchedRows` | Rows matched to settlements |
+| `exceptionRows` | Rows with parse errors or mismatches |
+| `progress` | Processing progress (0–100) |
+| `message` | Status message |
+| `uploadedAt` | Upload timestamp |
+
+On successful upload, the merchant's `lastBankStatementUploadAt` field is updated.
+
+### UTR — The Key Matching Identifier
+
+UTR (Unique Transaction Reference) is assigned by RBI for every NEFT/IMPS transfer. It arrives from **both sides**:
+
+```
+Razorpay webhook → settlement.entity.utr → stored as Settlement.utrNumber
+Bank statement   → Ref No/Cheque No column (or extracted from narration)
+                   → stored as BankStatementEntry.utrNumber
+```
+
+Razorpay knows the UTR because they initiate the bank transfer. The bank records the same UTR when it receives the transfer. Matching on UTR is 100% conclusive.
+
 ### Three-pass matching strategy
 
-`BankStatementMatchingService` attempts three passes in order, stopping as soon as a match is found. Only `CR` (credit) entries from payment gateway narrations are considered for matching.
+`BankStatementMatchingService` attempts three passes in order, stopping as soon as a match is found. All `CR` (credit) entries are considered for matching — entries that don't match any settlement stay `PENDING` for the catch-up job to retry.
 
 #### Pass 1 — UTR Match (Confidence: 100%)
 
 ```
 if entry.utrNumber is not blank:
     find Settlement where utrNumber = entry.utrNumber AND status = SETTLED
-    found → mark MATCHED, matchedBy = UTR
-             check amount: |settlement.netAmount - entry.amount| > tolerance?
+    found → check amount: |settlement.netAmount - entry.amount| > tolerance?
                yes → mark UNMATCHED, create BANK_AMOUNT_MISMATCH exception (CRITICAL)
-               no  → update settlement to MATCHED_TO_BANK, set bankCreditAmount/Date
+               no  → mark MATCHED, matchedBy = UTR
+                      update settlement to MATCHED_TO_BANK, set bankCreditAmount/Date
 ```
-
-UTR (Unique Transaction Reference) is the definitive identifier for an NEFT/IMPS bank transfer. A UTR match is conclusive.
 
 #### Pass 2 — Amount + Date Match (Confidence: ~85%)
 
@@ -1138,27 +1210,39 @@ if entry is still PENDING:
     find Settlements where:
         status = SETTLED
         netAmount within ±500 paisa of entry.amount
-        settledAt within ±1 day of entry.entryDate
-    filter by providerHint matching narration (if hint available)
-    single result → mark MATCHED, matchedBy = AMOUNT_DATE
-    multiple results → ambiguous, leave PENDING (will retry in BankStatementCatchUpJob)
+        bankCreditDate within ±1 day of entry.entryDate
+        (falls back to settledAt date when bankCreditDate is null)
+    filter by provider matching narration (if available)
+    first match → mark MATCHED, matchedBy = AMOUNT_DATE
 ```
+
+The `settledAt` fallback is critical because `bankCreditDate` is only populated after a match — without the fallback, fresh settlements would be invisible to Pass 2.
 
 #### Pass 3 — Narration Parse (Confidence: ~70%)
 
 ```
 if entry is still PENDING:
-    parse narration for known patterns:
-        "RAZORPAY*SETTLEMENT*setl_ABC" or "SETL_" prefix
-    find Settlement by parsedSettlementId
+    search for any Settlement whose providerSettlementId appears in the narration
+    e.g., narration "NEFT Razorpay settlement setl_001" contains "setl_001"
     found → mark MATCHED, matchedBy = NARRATION
 ```
+
+### Timing — Who Arrives First?
+
+The system handles all timing combinations:
+
+| Scenario | What happens |
+|---|---|
+| Settlement first, bank statement later | `matchEntry()` at upload time matches immediately |
+| Bank statement first, settlement later | `tryMatchBySettlement()` retroactively matches PENDING entries when settlement is saved |
+| Both arrive, UTR not yet available | Pass 2/3 matches by amount+date or narration |
+| Neither matches immediately | Entry stays `PENDING`, catch-up job retries daily |
 
 ### Entry points
 
 - **`matchEntry(entry)`** — Called immediately when a bank statement row is uploaded
 - **`tryMatchBySettlement(settlement)`** — Called retroactively when a settlement is saved (covers entries that arrived before the settlement)
-- **`rematchPending()`** — Called by `BankStatementCatchUpJob` to retry all `PENDING` entries
+- **`rematchPending()`** / **`rematchPending(merchantId, uploadBatchId)`** — Called by `BankStatementCatchUpJob` or manually via the reconcile endpoint
 
 ### Unmatched entries and overdue detection
 
@@ -1435,7 +1519,7 @@ All jobs use [db-scheduler](https://github.com/kagkarlsson/db-scheduler), a pers
 
 ## 24. Data Model
 
-Flyway manages 18 versioned migrations (V1–V18). All primary keys are `bigint GENERATED ALWAYS AS IDENTITY`. All timestamps are `timestamptz` stored in UTC.
+Flyway manages 19 versioned migrations (V1–V19). All primary keys are `bigint GENERATED ALWAYS AS IDENTITY`. All timestamps are `timestamptz` stored in UTC.
 
 ### Table: `webhook_events`
 
@@ -1542,6 +1626,7 @@ Flyway manages 18 versioned migrations (V1–V18). All primary keys are `bigint 
 | `password_hash` | varchar(256) | BCrypt hash of password (optional) |
 | `webhook_secret` | varchar(256) | Per-merchant webhook signing secret |
 | `status` | varchar(20) | Merchant account status (default `ACTIVE`) |
+| `last_bank_statement_upload_at` | timestamptz | Updated on each successful bank statement upload |
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
 
@@ -1595,6 +1680,23 @@ Flyway manages 18 versioned migrations (V1–V18). All primary keys are `bigint 
 | `match_status` | enum | `PENDING`, `MATCHED`, `AMOUNT_MISMATCH`, `NOT_FOUND_IN_DB` |
 | `matched_to_txn_id` | bigint FK | Matched transaction (nullable) |
 
+### Table: `bank_statement_uploads`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | bigint PK | |
+| `upload_id` | varchar(60) | UNIQUE, e.g. `bsu_e5ce45f92a78` |
+| `merchant_id` | varchar(60) | |
+| `file_name` | varchar(255) | Original uploaded file name |
+| `status` | varchar(20) | `ACCEPTED`, `PROCESSING`, `COMPLETED`, `FAILED` |
+| `rows_parsed` | integer | Total rows parsed |
+| `matched_rows` | integer | Rows matched to settlements |
+| `exception_rows` | integer | Parse errors or mismatches |
+| `progress` | integer | 0–100 |
+| `message` | varchar(255) | Status message |
+| `uploaded_at` | timestamptz | |
+| `updated_at` | timestamptz | |
+
 ### Table: `bank_statement_entries`
 
 | Column | Type | Notes |
@@ -1603,15 +1705,15 @@ Flyway manages 18 versioned migrations (V1–V18). All primary keys are `bigint 
 | `merchant_id` | varchar(60) | |
 | `upload_batch_id` | varchar(60) | Groups entries from one upload |
 | `entry_date` | date | |
-| `amount` | bigint | In smallest currency unit |
+| `amount` | bigint | In smallest currency unit (paisa) |
 | `currency` | char(3) | |
 | `credit_debit` | varchar(2) | `CR` or `DR` |
-| `utr_number` | varchar(60) | Bank UTR reference |
+| `utr_number` | varchar(80) | Bank UTR (from column or extracted from narration) |
 | `bank_reference` | varchar(120) | Bank's internal reference |
 | `narration` | text | Free-text description |
-| `provider_hint` | varchar(30) | Provider hint parsed from narration |
+| `provider_hint` | varchar(30) | Provider inferred from narration |
 | `match_status` | enum | `PENDING`, `MATCHED`, `UNMATCHED`, `IGNORED` |
-| `matched_by` | varchar(30) | `UTR`, `AMOUNT_DATE`, or `NARRATION` |
+| `matched_by` | varchar(20) | `UTR`, `AMOUNT_DATE`, or `NARRATION` |
 | `matched_settlement_id` | bigint FK | Matched settlement (nullable) |
 | `created_at` | timestamptz | |
 
@@ -1706,7 +1808,7 @@ Both return `200 "received"` on success, `400 "Invalid signature"` on failure.
 
 | Method | Path | Params / Body | Description |
 |---|---|---|---|
-| GET | `/api/v1/exceptions` | `days`, `status`, `provider`, `type`, `page`, `limit` | List exceptions |
+| GET | `/api/v1/exceptions` | `fromDate`, `toDate`, `status`, `provider`, `type`, `page`, `limit` | List exceptions |
 | GET | `/api/v1/exceptions/{id}` | — | Exception detail + linked transaction + audit trail |
 | PATCH | `/api/v1/exceptions/{id}` | `{status, notes}` + `X-Actor` header | Update exception status |
 
@@ -1737,8 +1839,12 @@ Both return `200 "received"` on success, `400 "Invalid signature"` on failure.
 
 | Method | Path | Params / Body | Description |
 |---|---|---|---|
-| POST | `/api/v1/bank-statements/upload` | Multipart: `file` (CSV), `currency` (default INR) | Upload bank statement CSV; triggers immediate matching |
+| POST | `/api/v1/bank-statements/upload` | Multipart: `file` (CSV/TSV), `currency` (default INR) | Upload bank statement; triggers immediate matching |
 | GET | `/api/v1/bank-statements` | `status`, `page`, `limit` | List bank statement entries with summary |
+| POST | `/api/v1/reconciliation/bank-statements/upload` | Multipart: `statement`, `source`, `provider` | Upload with tracking (status, progress) |
+| GET | `/api/v1/reconciliation/bank-statements` | `limit` | List recent uploads |
+| GET | `/api/v1/reconciliation/bank-statements/{uploadId}` | — | Get upload status and match counts |
+| POST | `/api/v1/reconciliation/bank-statements/{uploadId}/reconcile` | — | Re-trigger matching for an upload |
 
 ### Admin (requires JWT + `X-Actor` header)
 
@@ -1886,7 +1992,8 @@ All existing tests are unit tests using Mockito mocks. There is no in-memory dat
 | `OrderMatchingServiceTest` | Match on capture — exact, overpaid, underpaid; match on order creation; amount tolerance boundaries |
 | `OrderControllerTest` | Order CRUD endpoint tests |
 | `TransactionControllerTest` | Transaction query endpoint tests |
-| `BankStatementMatchingServiceTest` | Pass 1 UTR match; Pass 2 amount+date match; Pass 3 narration parse; amount mismatch on UTR match creates exception |
+| `BankStatementIngestionServiceTest` | Standard CSV split columns; single amount+CR/DR column; Indian amount format; SBI-style metadata header with footer; TSV internal format; provider detection; malformed line handling; empty file; batch ID assignment |
+| `BankStatementMatchingServiceTest` | Pass 1 UTR match; Pass 2 amount+date match; Pass 3 narration parse; amount mismatch on UTR match creates exception; non-gateway credits stay PENDING |
 | `ReconciliationEngineTest` | One rule failing does not block subsequent rules |
 | `RuleBehaviorTest` | All 7 rules: candidate detection + exception creation + deduplication |
 | `ExceptionRecordServiceTest` | Deduplication: does not create a second exception for same (type, txnId); synthetic key dedup for order exceptions |

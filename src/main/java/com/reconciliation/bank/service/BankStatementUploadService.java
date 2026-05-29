@@ -5,6 +5,7 @@ import com.reconciliation.bank.repository.BankStatementEntryRepository;
 import com.reconciliation.bank.repository.BankStatementUploadRepository;
 import com.reconciliation.common.enums.BankEntryStatus;
 import com.reconciliation.common.enums.BankStatementUploadStatus;
+import com.reconciliation.merchant.repository.MerchantRepository;
 import java.time.OffsetDateTime;
 import java.util.Map;
 import java.util.UUID;
@@ -23,6 +24,7 @@ public class BankStatementUploadService {
     private final BankStatementEntryRepository entryRepository;
     private final BankStatementIngestionService ingestionService;
     private final BankStatementMatchingService matchingService;
+    private final MerchantRepository merchantRepository;
 
     public Map<String, Object> upload(MultipartFile file, String merchantId, String source, String provider) {
         if (file == null || file.isEmpty()) {
@@ -60,6 +62,11 @@ public class BankStatementUploadService {
             upload.setProgress(100);
             upload.setMessage("Bank statement accepted for reconciliation.");
             upload = uploadRepository.save(upload);
+
+            merchantRepository.findByMerchantId(merchantId).ifPresent(merchant -> {
+                merchant.setLastBankStatementUploadAt(OffsetDateTime.now());
+                merchantRepository.save(merchant);
+            });
 
             Map<String, Object> response = uploadResponse(upload);
             response.put("status", BankStatementUploadStatus.ACCEPTED.name());

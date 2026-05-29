@@ -42,12 +42,6 @@ public class BankStatementMatchingService {
             return;
         }
 
-        if (!isPaymentGatewayCredit(entry)) {
-            entry.setMatchStatus(BankEntryStatus.IGNORED);
-            bankEntryRepository.save(entry);
-            return;
-        }
-
         Optional<Settlement> match = tryPass1Utr(entry)
                 .or(() -> tryPass2AmountDate(entry))
                 .or(() -> tryPass3Narration(entry));
@@ -234,13 +228,6 @@ public class BankStatementMatchingService {
     // ─────────────────────────────────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────
-
-    private boolean isPaymentGatewayCredit(BankStatementEntry entry) {
-        if (entry.getNarration() == null) return false;
-        String upper = entry.getNarration().toUpperCase();
-        return upper.contains("RAZORPAY") || upper.contains("STRIPE")
-                || upper.contains("CASHFREE") || upper.contains("PAYU");
-    }
 
     private boolean providerMatchesNarration(String provider, String narration) {
         if (narration == null || provider == null) return true; // don't filter if no info

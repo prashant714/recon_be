@@ -12,6 +12,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -62,6 +64,7 @@ public class BankStatementIngestionService {
             String headerLine = null;
             String line;
             int lineNum = 0;
+            int consecutiveFailures = 0;
 
             while ((line = reader.readLine()) != null) {
                 lineNum++;
@@ -69,8 +72,9 @@ public class BankStatementIngestionService {
                 if (trimmed.isEmpty()) continue;
 
                 if (headerLine == null) {
-                    // First non-empty line is the header
-                    headerLine = trimmed.toLowerCase();
+                    if (isHeaderLine(trimmed)) {
+                        headerLine = trimmed.toLowerCase();
+                    }
                     continue;
                 }
 
@@ -79,8 +83,14 @@ public class BankStatementIngestionService {
                             trimmed, headerLine, merchantId, batchId, resolvedCurrency);
                     if (entry != null) {
                         parsed.add(entry);
+                        consecutiveFailures = 0;
                     }
                 } catch (Exception e) {
+                    consecutiveFailures++;
+                    if (consecutiveFailures >= 3 && !parsed.isEmpty()) {
+                        log.debug("Stopping parse at line {} — likely footer section", lineNum);
+                        break;
+                    }
                     log.warn("Skipping malformed line {} in batch {}: {}", lineNum, batchId, e.getMessage());
                     errorCount++;
                 }
@@ -128,7 +138,7 @@ public class BankStatementIngestionService {
         Map<String, Integer> idx = buildIndex(headers);
 
         LocalDate date = extractDate(cols, idx, "date", "value date", "txn date", "transaction date",
-                "entrydate", "entry date", "posting date", "trans date");
+                "entrydate", "entry date", "posting date", "trans date", "tran date");
         if (date == null) {
             throw new IllegalArgumentException("missing or invalid transaction date");
         }
@@ -137,11 +147,12 @@ public class BankStatementIngestionService {
         Long amount;
         String creditDebit;
 
-        if (idx.containsKey("credit") || idx.containsKey("deposit")) {
-            String creditKey = idx.containsKey("credit") ? "credit" : "deposit";
-            String debitKey  = idx.containsKey("debit") ? "debit" : "withdrawal";
-            String creditVal = safeGet(cols, idx.get(creditKey));
-            String debitVal  = idx.containsKey(debitKey) ? safeGet(cols, idx.get(debitKey)) : "";
+        String creditKey = findKey(idx, "credit", "deposit", "deposit amt", "credit amt");
+        String debitKey = findKey(idx, "debit", "withdrawal", "withdrawal amt", "debit amt");
+
+        if (creditKey != null || debitKey != null) {
+            String creditVal = creditKey != null ? safeGet(cols, idx.get(creditKey)) : "";
+            String debitVal = debitKey != null ? safeGet(cols, idx.get(debitKey)) : "";
 
             if (!creditVal.isBlank() && parseAmount(creditVal) > 0) {
                 amount = parseAmount(creditVal);
@@ -157,7 +168,8 @@ public class BankStatementIngestionService {
             amount = parseAmountFromIndex(cols, idx, "amount", "txn amount");
             if (amount == null || amount == 0) return null;
 
-            String crDrRaw = extractString(cols, idx, "cr/dr", "type", "txn type", "debit/credit");
+            String crDrRaw = extractString(cols, idx, "cr/dr", "type", "txn type", "debit/credit",
+                    "creditdebit", "credit/debit");
             creditDebit = normalizeCrDr(crDrRaw, amount);
             if (creditDebit == null) return null;
             amount = Math.abs(amount);
@@ -166,8 +178,13 @@ public class BankStatementIngestionService {
         String narration = extractString(cols, idx,
                 "narration", "description", "particulars", "remarks", "details");
         String utr = extractString(cols, idx,
-                "utr", "utr no", "utr number", "utr/cheque no", "reference no", "reference number", "chq no");
-        String bankRef = extractString(cols, idx, "bank reference", "bank ref", "reference");
+                "utr", "utr no", "utr number", "utrnumber", "utr/cheque no",
+                "reference no", "reference number", "ref no/cheque no", "chq no", "chq/ref no");
+        if (utr == null && narration != null) {
+            utr = extractUtrFromNarration(narration);
+        }
+        String bankRef = extractString(cols, idx,
+                "bank reference", "bankreference", "bank ref", "reference");
 
         return BankStatementEntry.builder()
                 .merchantId(merchantId)
@@ -181,6 +198,31 @@ public class BankStatementIngestionService {
                 .narration(narration)
                 .providerHint(detectProvider(narration))
                 .build();
+    }
+
+    private boolean isHeaderLine(String line) {
+        String lower = line.toLowerCase();
+        String[] fields = splitCsv(lower);
+        boolean hasDate = false;
+        boolean hasAmount = false;
+        for (String field : fields) {
+            String f = field.trim();
+            if (f.contains("date")) hasDate = true;
+            if (f.equals("debit") || f.equals("credit") || f.equals("amount")
+                    || f.equals("deposit") || f.equals("withdrawal")
+                    || f.equals("deposit amt") || f.equals("withdrawal amt")
+                    || f.equals("txn amount") || f.equals("creditdebit")) {
+                hasAmount = true;
+            }
+        }
+        return hasDate && hasAmount;
+    }
+
+    private String findKey(Map<String, Integer> idx, String... candidates) {
+        for (String key : candidates) {
+            if (idx.containsKey(key)) return key;
+        }
+        return null;
     }
 
     private Map<String, Integer> buildIndex(String[] headers) {
@@ -260,6 +302,14 @@ public class BankStatementIngestionService {
         if (upper.startsWith("CR") || upper.equals("CREDIT") || upper.equals("C")) return "CR";
         if (upper.startsWith("DR") || upper.equals("DEBIT") || upper.equals("D")) return "DR";
         return null;
+    }
+
+    private static final Pattern UTR_PATTERN = Pattern.compile(
+            "(?:UTR[:\\s/]?|NEFT[/\\s])([A-Z0-9]{12,22})", Pattern.CASE_INSENSITIVE);
+
+    private String extractUtrFromNarration(String narration) {
+        Matcher m = UTR_PATTERN.matcher(narration);
+        return m.find() ? m.group(1) : null;
     }
 
     private String normalizeUtr(String raw) {

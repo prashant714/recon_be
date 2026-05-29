@@ -219,6 +219,68 @@ class BankStatementIngestionServiceTest {
         assertThat(result.get("batchId")).isEqualTo(batchId);
     }
 
+    // ─── SBI-style statement with metadata header and footer ──────────────
+
+    @Test
+    void sbiStatementWithMetadataHeader_skipsMetadataAndParsesTransactions() {
+        String sbiCsv = """
+                Mr. SHREYA MISHRA
+                State Bank of India
+                Account Number : XXXXXXXXX
+                Statement From : 01-05-2026 to 29-05-2026
+                Date,Details,Ref No/Cheque No,Debit,Credit,Balance
+                01/05/2026,NEFT RAZORPAY SETTLEMENT setl_001,UTR20260501001,,488000.00,1500000
+                02/05/2026,IMPS STRIPE PAYOUT po_002,UTR20260502001,,293000.00,1793000
+                02/05/2026,Vendor payment,NEFT001,50000.00,,1743000
+                Statement Summary : 01-05-2026 To 29-05-2026
+                Please do not share your ATM PIN or OTP with anyone.
+                This is a computer generated statement.
+                """;
+
+        MockMultipartFile file = csvFile("sbi_statement.csv", sbiCsv);
+        when(bankEntryRepository.saveAll(anyList())).thenAnswer(inv -> inv.getArgument(0));
+
+        Map<String, Object> result = service.ingest(file, "merchant_001", "INR");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<BankStatementEntry>> captor = ArgumentCaptor.forClass(List.class);
+        verify(bankEntryRepository).saveAll(captor.capture());
+
+        List<BankStatementEntry> saved = captor.getValue();
+        assertThat(saved).hasSize(3);
+
+        assertThat(saved.get(0).getCreditDebit()).isEqualTo("CR");
+        assertThat(saved.get(0).getAmount()).isEqualTo(48800000L);
+        assertThat(saved.get(0).getProviderHint()).isEqualTo("razorpay");
+        assertThat(saved.get(0).getUtrNumber()).isEqualTo("UTR20260501001");
+
+        assertThat(saved.get(2).getCreditDebit()).isEqualTo("DR");
+        assertThat(saved.get(2).getAmount()).isEqualTo(5000000L);
+    }
+
+    @Test
+    void tsvStatementWithInternalHeaders_parsesCorrectly() {
+        String tsv = "entryDate\tamount\tcurrency\tcreditDebit\tutrNumber\tbankReference\tnarration\tproviderHint\n"
+                + "2026-05-26\t170138\tINR\tCR\tUTR123456\tREF-RZP-001\tNEFT Razorpay settlement setl_test_001\trazorpay\n"
+                + "2026-05-28\t45000\tINR\tDR\tUTR123459\tREF-FEE-001\tBank charges and processing fee\tbank\n";
+
+        MockMultipartFile file = csvFile("internal.csv", tsv);
+        when(bankEntryRepository.saveAll(anyList())).thenAnswer(inv -> inv.getArgument(0));
+
+        service.ingest(file, "merchant_001", "INR");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<BankStatementEntry>> captor = ArgumentCaptor.forClass(List.class);
+        verify(bankEntryRepository).saveAll(captor.capture());
+
+        List<BankStatementEntry> saved = captor.getValue();
+        assertThat(saved).hasSize(2);
+        assertThat(saved.get(0).getCreditDebit()).isEqualTo("CR");
+        assertThat(saved.get(0).getUtrNumber()).isEqualTo("UTR123456");
+        assertThat(saved.get(1).getCreditDebit()).isEqualTo("DR");
+        assertThat(saved.get(1).getAmount()).isEqualTo(4500000L);
+    }
+
     // ─── helper ──────────────────────────────────────────────────────────────
 
     private MockMultipartFile csvFile(String name, String content) {

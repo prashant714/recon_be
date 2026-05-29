@@ -162,14 +162,14 @@ class BankStatementMatchingServiceTest {
     // ─── Non-payment-gateway credit ──────────────────────────────────────────
 
     @Test
-    void creditWithNoGatewayKeyword_isMarkedIgnored() {
+    void creditWithNoGatewayKeyword_staysPendingWhenNoMatchFound() {
         BankStatementEntry entry = creditEntry(100000L, null, "Interest credit from HDFC");
         when(bankEntryRepository.save(any())).thenAnswer(i -> i.getArgument(0));
+        when(settlementRepository.findByProviderSettlementIdInNarration(any())).thenReturn(List.of());
 
         service.matchEntry(entry);
 
-        assertThat(entry.getMatchStatus()).isEqualTo(BankEntryStatus.IGNORED);
-        verify(settlementRepository, never()).findByUtrNumber(any());
+        assertThat(entry.getMatchStatus()).isEqualTo(BankEntryStatus.PENDING);
     }
 
     // ─── Retroactive: settlement arrives after bank entry ────────────────────

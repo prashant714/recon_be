@@ -30,13 +30,14 @@ public interface SettlementRepository extends JpaRepository<Settlement, Long> {
             com.reconciliation.common.enums.SettlementStatus status, OffsetDateTime before);
 
     /** Find SETTLED settlements for a merchant whose net amount falls within a tolerance
-     *  range and credit date falls within a date window.
+     *  range and credit date (or settled date) falls within a date window.
      *  Used for amount+date fuzzy matching against bank statement entries (Pass 2). */
     @Query("""
         SELECT s FROM Settlement s
         WHERE s.merchantId = :merchantId
           AND s.netAmount BETWEEN :minAmount AND :maxAmount
-          AND s.bankCreditDate BETWEEN :from AND :to
+          AND (s.bankCreditDate BETWEEN :from AND :to
+               OR (s.bankCreditDate IS NULL AND CAST(s.settledAt AS localdate) BETWEEN :from AND :to))
           AND s.settlementStatus = com.reconciliation.common.enums.SettlementStatus.SETTLED
         """)
     List<Settlement> findSettledByNetAmountAndCreditDateRange(

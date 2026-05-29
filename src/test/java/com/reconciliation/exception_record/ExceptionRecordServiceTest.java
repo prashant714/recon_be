@@ -64,7 +64,7 @@ class ExceptionRecordServiceTest {
     }
 
     @Test
-    void orderAlertStoresSyntheticTransactionIdForDeduplication() {
+    void orderAlertStoresNullTransactionId() {
         when(repository.save(any(ExceptionRecord.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         ExceptionRecord record = service.createForOrderAlert(
@@ -76,9 +76,8 @@ class ExceptionRecordServiceTest {
                 "desc",
                 "merchant_001");
 
-        Long syntheticKey = -Math.abs((long) "ord_001".hashCode());
-        assertThat(record.getTransactionId()).isEqualTo(syntheticKey);
-        verify(repository).save(argThat(saved -> syntheticKey.equals(saved.getTransactionId())));
+        assertThat(record.getTransactionId()).isNull();
+        verify(repository).save(argThat(saved -> saved.getTransactionId() == null));
     }
 
     @Test
