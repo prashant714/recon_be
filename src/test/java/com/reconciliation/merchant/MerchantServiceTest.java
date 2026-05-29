@@ -40,7 +40,7 @@ class MerchantServiceTest {
         when(merchantRepository.existsByEmail("ops@zomato.com")).thenReturn(false);
         when(merchantRepository.save(any())).thenAnswer(i -> i.getArgument(0));
 
-        Map<String, String> result = service.register("zomato", "Zomato Ltd", "ops@zomato.com");
+        Map<String, String> result = service.register("zomato", "Zomato Ltd", "ops@zomato.com", null);
 
         assertThat(result.get("merchantId")).isEqualTo("zomato");
         String rawKey = result.get("apiKey");
@@ -60,7 +60,7 @@ class MerchantServiceTest {
     void register_duplicateMerchantId_throwsIllegalArgument() {
         when(merchantRepository.existsByMerchantId("zomato")).thenReturn(true);
 
-        assertThatThrownBy(() -> service.register("zomato", "Zomato", "new@zomato.com"))
+        assertThatThrownBy(() -> service.register("zomato", "Zomato", "new@zomato.com", null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("already registered");
 
@@ -72,7 +72,7 @@ class MerchantServiceTest {
         when(merchantRepository.existsByMerchantId("swiggy")).thenReturn(false);
         when(merchantRepository.existsByEmail("ops@zomato.com")).thenReturn(true);
 
-        assertThatThrownBy(() -> service.register("swiggy", "Swiggy", "ops@zomato.com"))
+        assertThatThrownBy(() -> service.register("swiggy", "Swiggy", "ops@zomato.com", null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Email already registered");
 

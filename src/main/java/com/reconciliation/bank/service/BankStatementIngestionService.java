@@ -127,7 +127,8 @@ public class BankStatementIngestionService {
 
         Map<String, Integer> idx = buildIndex(headers);
 
-        LocalDate date = extractDate(cols, idx, "date", "value date", "txn date", "transaction date");
+        LocalDate date = extractDate(cols, idx, "date", "value date", "txn date", "transaction date",
+                "entrydate", "entry date", "posting date", "trans date");
         if (date == null) {
             throw new IllegalArgumentException("missing or invalid transaction date");
         }
@@ -282,15 +283,16 @@ public class BankStatementIngestionService {
         return cols[idx] == null ? "" : cols[idx].trim().replace("\"", "");
     }
 
-    /** Minimal CSV split — handles quoted fields containing commas. */
+    /** Split CSV/TSV line — handles quoted fields and auto-detects tab vs comma delimiter. */
     private String[] splitCsv(String line) {
+        char delimiter = line.contains("\t") ? '\t' : ',';
         List<String> result = new ArrayList<>();
         boolean inQuotes = false;
         StringBuilder current = new StringBuilder();
         for (char c : line.toCharArray()) {
             if (c == '"') {
                 inQuotes = !inQuotes;
-            } else if (c == ',' && !inQuotes) {
+            } else if (c == delimiter && !inQuotes) {
                 result.add(current.toString());
                 current.setLength(0);
             } else {

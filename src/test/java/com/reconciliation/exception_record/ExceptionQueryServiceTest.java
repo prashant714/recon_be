@@ -12,6 +12,7 @@ import com.reconciliation.transaction.repository.TransactionRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
@@ -44,7 +45,7 @@ class ExceptionQueryServiceTest {
         ExceptionRecord rec = openException(1L, "merchant_001");
         when(exceptionRecordRepository.findAll()).thenReturn(List.of(rec));
 
-        Map<String, Object> result = service.list(7, null, null, null, 0, 50);
+        Map<String, Object> result = service.list(LocalDate.now().minusDays(7), LocalDate.now(), null, null, null, 0, 50);
 
         assertThat((List<?>) result.get("items")).hasSize(1);
         assertThat(result.get("total")).isEqualTo(1);
@@ -59,7 +60,7 @@ class ExceptionQueryServiceTest {
 
         when(exceptionRecordRepository.findAll()).thenReturn(List.of(old, recent));
 
-        Map<String, Object> result = service.list(7, null, null, null, 0, 50);
+        Map<String, Object> result = service.list(LocalDate.now().minusDays(7), LocalDate.now(), null, null, null, 0, 50);
 
         assertThat((List<?>) result.get("items")).hasSize(1);
         assertThat(result.get("total")).isEqualTo(1);
@@ -72,7 +73,7 @@ class ExceptionQueryServiceTest {
 
         when(exceptionRecordRepository.findAll()).thenReturn(List.of(open, resolved));
 
-        Map<String, Object> result = service.list(30, null, null, "OPEN", 0, 50);
+        Map<String, Object> result = service.list(LocalDate.now().minusDays(30), LocalDate.now(), null, null, "OPEN", 0, 50);
 
         assertThat((List<?>) result.get("items")).hasSize(1);
     }
@@ -84,7 +85,7 @@ class ExceptionQueryServiceTest {
 
         when(exceptionRecordRepository.findAll()).thenReturn(List.of(dup, missing));
 
-        Map<String, Object> result = service.list(30, null, "DUPLICATE_CAPTURE", null, 0, 50);
+        Map<String, Object> result = service.list(LocalDate.now().minusDays(30), LocalDate.now(), null, "DUPLICATE_CAPTURE", null, 0, 50);
 
         assertThat((List<?>) result.get("items")).hasSize(1);
     }
@@ -98,8 +99,8 @@ class ExceptionQueryServiceTest {
 
         when(exceptionRecordRepository.findAll()).thenReturn(all);
 
-        Map<String, Object> page0 = service.list(30, null, null, null, 0, 2);
-        Map<String, Object> page1 = service.list(30, null, null, null, 1, 2);
+        Map<String, Object> page0 = service.list(LocalDate.now().minusDays(30), LocalDate.now(), null, null, null, 0, 2);
+        Map<String, Object> page1 = service.list(LocalDate.now().minusDays(30), LocalDate.now(), null, null, null, 1, 2);
 
         assertThat((List<?>) page0.get("items")).hasSize(2);
         assertThat((List<?>) page1.get("items")).hasSize(2);
@@ -115,7 +116,7 @@ class ExceptionQueryServiceTest {
 
         when(exceptionRecordRepository.findAll()).thenReturn(List.of(open, inReview, resolved));
 
-        Map<String, Object> result = service.list(30, null, null, null, 0, 50);
+        Map<String, Object> result = service.list(LocalDate.now().minusDays(30), LocalDate.now(), null, null, null, 0, 50);
 
         @SuppressWarnings("unchecked")
         Map<String, Long> summary = (Map<String, Long>) result.get("summary");

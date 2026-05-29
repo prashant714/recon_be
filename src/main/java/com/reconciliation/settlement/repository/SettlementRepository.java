@@ -49,7 +49,7 @@ public interface SettlementRepository extends JpaRepository<Settlement, Long> {
     /** Paginated filtered listing — all params are optional (null = no filter). */
     @Query("""
         SELECT s FROM Settlement s
-        WHERE (:provider IS NULL OR LOWER(s.provider) = LOWER(:provider))
+        WHERE (CAST(:provider AS string) IS NULL OR LOWER(s.provider) = LOWER(:provider))
           AND (:status IS NULL OR s.settlementStatus = :status)
           AND (:dateFrom IS NULL OR s.bankCreditDate >= :dateFrom)
           AND (:dateTo IS NULL OR s.bankCreditDate <= :dateTo)
