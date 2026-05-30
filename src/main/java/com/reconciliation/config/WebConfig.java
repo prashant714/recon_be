@@ -14,7 +14,9 @@ public class WebConfig implements WebMvcConfigurer {
             "http://127.0.0.1:*",
             "https://127.0.0.1:*",
             "https://dhiyos.com",
-            "https://dhiyos.com/*"
+            "https://dhiyos.com/*",
+            "https://www.dhiyos.com",
+            "https://www.dhiyos.com/*"
     );
 
     @Override
