@@ -26,6 +26,13 @@ public class GlobalExceptionHandler {
                 .body(errorBody("DUPLICATE_EVENT", ex.getMessage()));
     }
 
+    @ExceptionHandler(InvalidProviderCredentialsException.class)
+    public ResponseEntity<Map<String, Object>> handleInvalidCredentials(InvalidProviderCredentialsException ex) {
+        log.warn("Provider credential verification failed: {}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+                .body(errorBody("INVALID_CREDENTIALS", ex.getMessage()));
+    }
+
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<Map<String, Object>> handleBadRequest(IllegalArgumentException ex) {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)

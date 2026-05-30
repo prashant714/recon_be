@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -37,6 +38,17 @@ public class ProviderConnectionController {
         }
         return ResponseEntity.ok(connectionService.upsert(
                 merchantId, connection.provider(), connection.apiKey(), connection.secret()));
+    }
+
+    @PostMapping("/test")
+    public ResponseEntity<?> test(
+            @RequestParam String provider,
+            HttpServletRequest request) {
+        String merchantId = merchantId(request);
+        if (merchantId == null) {
+            return ResponseEntity.status(401).body(Map.of("error", "Merchant authentication required"));
+        }
+        return ResponseEntity.ok(connectionService.testConnection(merchantId, provider));
     }
 
     private String merchantId(HttpServletRequest request) {

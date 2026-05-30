@@ -844,13 +844,15 @@ public interface ReconciliationRule {
 
 ### ExactIdMatchRule
 
-**Purpose:** Close out `CAPTURED` payments that have been waiting for settlement.
+**Purpose:** Flag captured payments that have no order reference and cannot be reconciled automatically.
 
 **Candidates:** Transactions with `status=CAPTURED` AND `reconciliationStatus=PENDING_SETTLEMENT` AND `eventOccurredAt < now - 5 minutes`.
 
 **Logic:**
-- If the transaction has a non-blank `orderId` → mark `reconciliationStatus=MATCHED`
-- If `orderId` is missing → create `UNMATCHED_PAYMENT` exception (MEDIUM severity), mark `reconciliationStatus=EXCEPTION`
+- If the transaction has a non-blank `providerOrderId` → **skip** (already handled by `OrderMatchingService` at ingestion time)
+- If `providerOrderId` is missing → create `UNMATCHED_PAYMENT` exception (MEDIUM severity), mark `reconciliationStatus=EXCEPTION`
+
+This rule does **not** promote transactions to `MATCHED` — that happens via `OrderMatchingService` (on capture) or `ProviderReportMatchRule` (on settlement report sync). This rule only catches payments that slipped through without any order reference.
 
 **Why 5-minute delay?** A payment captured right now may still be receiving supplemental data (like order ID) from a second event arriving within seconds.
 
@@ -862,7 +864,7 @@ public interface ReconciliationRule {
 
 **Candidates:** Transactions with `status=AUTHORIZED` AND `eventOccurredAt < now - 24 hours` (configurable via `app.reconciliation.missing-capture-threshold-hours`).
 
-**On match:** Creates `MISSING_CAPTURE` exception (HIGH severity).
+**On match:** Creates `MISSING_CAPTURE` exception (HIGH severity), sets `reconciliationStatus=EXCEPTION`, and links the exception ID to the transaction.
 
 ---
 
@@ -872,7 +874,7 @@ public interface ReconciliationRule {
 
 **Candidates:** Transactions with `eventType=REFUND` AND `parentTransactionId IS NULL` AND `eventOccurredAt < now - 10 minutes`.
 
-**On match:** Creates `ORPHAN_REFUND` exception (HIGH severity).
+**On match:** Creates `ORPHAN_REFUND` exception (HIGH severity), sets `reconciliationStatus=EXCEPTION`, and links the exception ID to the transaction.
 
 **Why 10-minute grace?** The parent payment and the refund may arrive very close together. The 10-minute window allows the parent to be saved before the rule runs.
 
@@ -884,7 +886,7 @@ public interface ReconciliationRule {
 
 **Candidates:** `(merchantId, orderId)` groups where more than one `CAPTURED` payment exists for the same order.
 
-**Logic:** Query groups that have `COUNT > 1`, then flag every transaction in that group with a `DUPLICATE_CAPTURE` exception (CRITICAL severity).
+**Logic:** Query groups that have `COUNT > 1`, then for every transaction in that group: create a `DUPLICATE_CAPTURE` exception (CRITICAL severity), set `reconciliationStatus=EXCEPTION`, and link the exception ID.
 
 ---
 
@@ -894,16 +896,25 @@ public interface ReconciliationRule {
 
 **Candidates:** Settlements with `settlementStatus=SETTLED`.
 
-**Logic:**
+**Pre-condition — Provider report readiness:** The rule first checks whether the settlement's provider report lines are fully synced and matched. It skips the settlement if:
+- No report lines exist yet (report not synced)
+- Any report lines are still `PENDING` (ProviderReportMatchRule hasn't run yet)
+- Line count is less than the expected `transactionCount`
+
+**Logic (once report is ready):**
 ```
 transactionSum = SUM(netAmount) WHERE settlementId = settlement.providerSettlementId
 diff = ABS(settlement.netAmount - transactionSum)
 
 if diff > tolerance (default 100 paisa):
     create SETTLEMENT_DISCREPANCY exception (CRITICAL)
-    mark settlement.settlementStatus = DISCREPANT
+    mark settlementStatus = DISCREPANT
+
+else if bank credit is confirmed (bankCreditAmount and bankCreditDate are set):
+    mark settlementStatus = MATCHED_TO_BANK
+
 else:
-    log success (settlement is correct)
+    log "totals verified, awaiting bank credit confirmation"
 ```
 
 The tolerance (default 100 paisa = ₹1) is configurable via `app.reconciliation.amount-tolerance-paisa`.
@@ -912,28 +923,50 @@ The tolerance (default 100 paisa = ₹1) is configurable via `app.reconciliation
 
 ### ProviderReportMatchRule
 
-**Purpose:** Verify that every line in a provider's settlement report (`SettlementReportLine`) maps to a known transaction in the system.
+**Purpose:** Verify that every line in a provider's settlement report (`SettlementReportLine`) maps to a known transaction in the system with matching amounts.
 
 **Candidates:** `SettlementReportLine` records with `matchStatus=PENDING`.
 
-**Logic:**
-- For each pending line, look up a transaction by `providerTxnId`
-- Found → mark line `MATCHED`, link `matchedToTxnId`
-- Not found → mark line status accordingly, create `PROVIDER_REPORT_MISMATCH` exception
+**Logic — three outcomes per line:**
 
-**Report line match statuses:** `PENDING`, `MATCHED`, `AMOUNT_MISMATCH`, `NOT_FOUND_IN_DB`
+```
+Look up Transaction by (provider, providerTxnId):
 
-This rule catches cases where a provider credits an amount in their settlement report for a transaction the platform never received via webhook or polling.
+NOT FOUND:
+    line.matchStatus = NOT_FOUND_IN_DB
+    create PROVIDER_REPORT_MISMATCH exception (HIGH)
+
+FOUND + amounts match (within tolerance):
+    line.matchStatus = MATCHED
+    line.matchedToTxnId = transaction.id
+    transaction.reconciliationStatus = MATCHED
+    transaction.settlementId = settlement.providerSettlementId
+
+FOUND + amounts differ:
+    line.matchStatus = AMOUNT_MISMATCH
+    create PROVIDER_REPORT_MISMATCH exception (HIGH)
+    transaction.reconciliationStatus = EXCEPTION
+```
+
+This rule is the primary path that promotes transactions to `MATCHED` status — it confirms that the provider's settlement report agrees with our transaction records. It also catches cases where a provider credits an amount for a transaction the platform never received via webhook or polling.
 
 ---
 
 ### UnmatchedOrderRule
 
-**Purpose:** Flag orders that have remained in `CREATED` status for longer than the configured grace window, indicating no payment was ever received.
+**Purpose:** Detect mismatches between orders and payments in both directions — orders without payments and payments without orders.
 
-**Candidates:** Orders with `orderStatus=CREATED` AND `createdAt < now - grace window`.
+**Check 1 — Orders with no payment:**
 
-**On match:** Creates `UNMATCHED_ORDER` exception (MEDIUM severity). This allows ops to investigate whether the payment was missed or the order was abandoned.
+**Candidates:** Orders with `orderStatus=CREATED` AND `createdAt < now - 30 minutes` (configurable via `app.order-matching.payment-grace-minutes`).
+
+**On match:** Creates `MISSING_PAYMENT` exception (HIGH severity). This alerts ops that a customer's order has no corresponding captured payment — either the payment was missed, the webhook was lost, or the customer abandoned checkout.
+
+**Check 2 — Payments with no pre-registered order:**
+
+**Candidates:** Captured transactions that have a `providerOrderId` but no matching pre-registered `Order` in our system, AND `eventOccurredAt < now - 15 minutes` (configurable via `app.order-matching.order-grace-minutes`).
+
+**On match:** Creates `UNREGISTERED_PAYMENT` exception (MEDIUM severity), sets `reconciliationStatus=EXCEPTION`. This catches payments where the merchant's system processed a charge but never called our order registration API.
 
 ---
 
@@ -941,7 +974,7 @@ This rule catches cases where a provider credits an amount in their settlement r
 
 `ExceptionRecordService.createForTransaction()` checks whether an OPEN or IN_REVIEW exception of the same `(type, transactionId)` already exists before creating a new one. This prevents the engine from creating duplicate exceptions on every 5-minute run.
 
-For order-level exceptions, a synthetic hash key based on `(merchantId, orderId, exceptionType)` is used for deduplication since no single transaction FK is available.
+For order-level exceptions (`createForOrderAlert`), deduplication checks for an existing exception matching `(type, merchantId, description containing orderId)`. The `transactionId` is stored as null since no single transaction is involved.
 
 ---
 
@@ -953,22 +986,22 @@ An `ExceptionRecord` represents an anomaly detected by the reconciliation engine
 
 | Type | Created by | Severity |
 |---|---|---|
-| `UNMATCHED_PAYMENT` | ExactIdMatchRule | MEDIUM |
+| `UNMATCHED_PAYMENT` | ExactIdMatchRule (no providerOrderId on captured payment) | MEDIUM |
 | `UNMATCHED_REFUND` | Refund matching | MEDIUM |
-| `MISSING_CAPTURE` | MissingCaptureRule | HIGH |
-| `ORPHAN_REFUND` | OrphanRefundRule | HIGH |
-| `DUPLICATE_CAPTURE` | DuplicateCaptureRule | CRITICAL |
-| `SETTLEMENT_DISCREPANCY` | SettlementTotalRule, SettlementReconcilerJob | CRITICAL / HIGH |
-| `PROVIDER_REPORT_MISMATCH` | ProviderReportMatchRule | HIGH |
-| `ORDER_AMOUNT_MISMATCH` | OrderMatchingService | HIGH |
+| `MISSING_CAPTURE` | MissingCaptureRule (AUTHORIZED > 24h) | HIGH |
+| `ORPHAN_REFUND` | OrphanRefundRule (refund with no parent payment) | HIGH |
+| `DUPLICATE_CAPTURE` | DuplicateCaptureRule (same order charged twice) | CRITICAL |
+| `SETTLEMENT_DISCREPANCY` | SettlementTotalRule (amount mismatch), SettlementReconcilerJob (overdue) | CRITICAL / HIGH |
+| `PROVIDER_REPORT_MISMATCH` | ProviderReportMatchRule (txn not found or amount differs) | HIGH |
+| `ORDER_AMOUNT_MISMATCH` | OrderMatchingService (overpaid or underpaid) | HIGH |
 | `AMOUNT_MISMATCH` | General amount discrepancy checks | MEDIUM |
-| `MISSING_PAYMENT` | Missing payment detection | HIGH |
-| `UNREGISTERED_PAYMENT` | OrderMatchingService (no order found) | MEDIUM |
+| `MISSING_PAYMENT` | UnmatchedOrderRule (order registered but no payment received) | HIGH |
+| `UNREGISTERED_PAYMENT` | UnmatchedOrderRule (payment captured but no order registered) | MEDIUM |
 | `STATUS_MISMATCH` | Status inconsistency checks | MEDIUM |
 | `FEE_DISCREPANCY` | Fee verification | MEDIUM |
-| `BANK_AMOUNT_MISMATCH` | BankStatementMatchingService | CRITICAL |
-| `UNMATCHED_BANK_CREDIT` | BankStatementCatchUpJob | MEDIUM |
-| `OVERDUE_BANK_CREDIT` | BankStatementCatchUpJob, SettlementReconcilerJob | HIGH |
+| `BANK_AMOUNT_MISMATCH` | BankStatementMatchingService (UTR/narration matched but amounts differ) | CRITICAL |
+| `UNMATCHED_BANK_CREDIT` | BankStatementCatchUpJob (bank credit with no matching settlement) | MEDIUM |
+| `OVERDUE_BANK_CREDIT` | BankStatementCatchUpJob, SettlementReconcilerJob (settlement without bank confirmation) | HIGH |
 
 ### Exception lifecycle
 

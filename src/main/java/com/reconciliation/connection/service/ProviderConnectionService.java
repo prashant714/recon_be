@@ -16,6 +16,7 @@ public class ProviderConnectionService {
 
     private final ProviderConnectionRepository connectionRepository;
     private final EncryptionService encryptionService;
+    private final ProviderCredentialVerifier credentialVerifier;
 
     @Transactional(readOnly = true)
     public Map<String, Object> list(String merchantId) {
@@ -35,6 +36,8 @@ public class ProviderConnectionService {
         if (secret == null || secret.isBlank()) {
             throw new IllegalArgumentException("secret is required");
         }
+
+        credentialVerifier.verify(normalizedProvider, apiKey.trim(), secret.trim());
 
         ProviderConnection connection = connectionRepository
                 .findByMerchantIdAndProvider(merchantId, normalizedProvider)
@@ -70,6 +73,22 @@ public class ProviderConnectionService {
     }
 
     @Transactional(readOnly = true)
+    public Map<String, Object> testConnection(String merchantId, String provider) {
+        String normalizedProvider = normalizeProvider(provider);
+        ProviderConnection connection = connectionRepository
+                .findByMerchantIdAndProvider(merchantId, normalizedProvider)
+                .filter(c -> c.getStatus() == ConnectionStatus.ACTIVE)
+                .orElseThrow(() -> new IllegalArgumentException("No active connection found for provider: " + normalizedProvider));
+
+        credentialVerifier.verify(
+                normalizedProvider,
+                encryptionService.decrypt(connection.getApiKeyEncrypted()),
+                encryptionService.decrypt(connection.getSecretEncrypted()));
+
+        return Map.of("provider", normalizedProvider, "status", "OK");
+    }
+
+    @Transactional(readOnly = true)
     public java.util.Optional<ProviderConnection> findActiveConnection(String merchantId, String provider) {
         return connectionRepository.findByMerchantIdAndProvider(merchantId, provider)
                 .filter(c -> c.getStatus() == ConnectionStatus.ACTIVE);
@@ -93,6 +112,7 @@ public class ProviderConnectionService {
                 "id", connection.getId(),
                 "provider", connection.getProvider(),
                 "apiKey", connection.getApiKeyMasked(),
+                "secretStored", connection.getSecretEncrypted() != null && !connection.getSecretEncrypted().isBlank(),
                 "status", connection.getStatus().name(),
                 "createdAt", connection.getCreatedAt(),
                 "updatedAt", connection.getUpdatedAt());
