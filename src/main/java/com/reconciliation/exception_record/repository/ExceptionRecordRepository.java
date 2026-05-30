@@ -49,12 +49,16 @@ public interface ExceptionRecordRepository extends JpaRepository<ExceptionRecord
 
     @org.springframework.data.jpa.repository.Query("""
         SELECT COUNT(e) FROM ExceptionRecord e
+        LEFT JOIN Transaction t ON t.id = e.transactionId
         WHERE e.merchantId = :merchantId
           AND e.status = com.reconciliation.common.enums.ExceptionStatus.OPEN
-          AND e.detectedAt >= :from
-          AND e.detectedAt < :to
+          AND (
+              (e.transactionId IS NOT NULL AND t.eventOccurredAt >= :from AND t.eventOccurredAt < :to)
+              OR
+              (e.transactionId IS NULL AND e.detectedAt >= :from AND e.detectedAt < :to)
+          )
     """)
-    long countOpenExceptionsBetween(
+    long countDashboardOpenExceptionsBetween(
             @org.springframework.data.repository.query.Param("merchantId") String merchantId,
             @org.springframework.data.repository.query.Param("from") java.time.OffsetDateTime from,
             @org.springframework.data.repository.query.Param("to") java.time.OffsetDateTime to);
@@ -73,15 +77,36 @@ public interface ExceptionRecordRepository extends JpaRepository<ExceptionRecord
     @Query("""
         SELECT e.exceptionType, COUNT(e)
         FROM ExceptionRecord e
+        LEFT JOIN Transaction t ON t.id = e.transactionId
         WHERE e.merchantId = :merchantId
-          AND e.detectedAt >= :from
-          AND e.detectedAt < :to
+          AND (
+              (e.transactionId IS NOT NULL AND t.eventOccurredAt >= :from AND t.eventOccurredAt < :to)
+              OR
+              (e.transactionId IS NULL AND e.detectedAt >= :from AND e.detectedAt < :to)
+          )
         GROUP BY e.exceptionType
     """)
-    List<Object[]> countByTypeForMerchantBetween(
+    List<Object[]> countDashboardByTypeForMerchantBetween(
             @Param("merchantId") String merchantId,
             @Param("from") java.time.OffsetDateTime from,
             @Param("to") java.time.OffsetDateTime to);
+
+    @Query("""
+        SELECT e
+        FROM ExceptionRecord e
+        LEFT JOIN Transaction t ON t.id = e.transactionId
+        WHERE e.merchantId = :merchantId
+          AND (
+              (e.transactionId IS NOT NULL AND t.eventOccurredAt >= :from AND t.eventOccurredAt < :to)
+              OR
+              (e.transactionId IS NULL AND e.detectedAt >= :from AND e.detectedAt < :to)
+          )
+    """)
+    org.springframework.data.domain.Page<ExceptionRecord> findDashboardExceptionsForMerchantBetween(
+            @Param("merchantId") String merchantId,
+            @Param("from") java.time.OffsetDateTime from,
+            @Param("to") java.time.OffsetDateTime to,
+            org.springframework.data.domain.Pageable pageable);
 
     long countByStatusIn(Collection<ExceptionStatus> statuses);
 
@@ -114,16 +139,20 @@ public interface ExceptionRecordRepository extends JpaRepository<ExceptionRecord
             @Param("since") java.time.OffsetDateTime since);
 
     @Query(value = """
-        SELECT CAST(e.detected_at AS date) AS bucket,
+        SELECT CAST(COALESCE(t.event_occurred_at, e.detected_at) AS date) AS bucket,
                COUNT(*) AS exceptions
         FROM exception_records e
+        LEFT JOIN transactions t ON t.id = e.transaction_id
         WHERE e.merchant_id = :merchantId
-          AND e.detected_at >= :from
-          AND e.detected_at < :to
-        GROUP BY CAST(e.detected_at AS date)
+          AND (
+              (e.transaction_id IS NOT NULL AND t.event_occurred_at >= :from AND t.event_occurred_at < :to)
+              OR
+              (e.transaction_id IS NULL AND e.detected_at >= :from AND e.detected_at < :to)
+          )
+        GROUP BY CAST(COALESCE(t.event_occurred_at, e.detected_at) AS date)
         ORDER BY bucket
         """, nativeQuery = true)
-    List<Object[]> findDailyExceptionTrendBetween(
+    List<Object[]> findDashboardDailyExceptionTrendBetween(
             @Param("merchantId") String merchantId,
             @Param("from") java.time.OffsetDateTime from,
             @Param("to") java.time.OffsetDateTime to);

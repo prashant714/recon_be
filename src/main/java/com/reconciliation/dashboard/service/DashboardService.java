@@ -33,7 +33,7 @@ public class DashboardService {
         long totalTransactions = transactionRepository.countByMerchantIdAndEventOccurredAtBetween(merchantId, from, to);
         long matched = transactionRepository.countByMerchantIdAndReconciliationStatusAndEventOccurredAtBetween(
                 merchantId, ReconciliationStatus.MATCHED, from, to);
-        long openExceptions = exceptionRecordRepository.countOpenExceptionsBetween(merchantId, from, to);
+        long openExceptions = exceptionRecordRepository.countDashboardOpenExceptionsBetween(merchantId, from, to);
         double matchRate = totalTransactions == 0 ? 0.0 : (matched * 100.0) / totalTransactions;
 
         Map<String, Map<String, Long>> byProvider = new LinkedHashMap<>();
@@ -45,12 +45,12 @@ public class DashboardService {
         }
 
         Map<String, Long> byExceptionType = new LinkedHashMap<>();
-        for (Object[] row : exceptionRecordRepository.countByTypeForMerchantBetween(merchantId, from, to)) {
+        for (Object[] row : exceptionRecordRepository.countDashboardByTypeForMerchantBetween(merchantId, from, to)) {
             byExceptionType.put(String.valueOf(row[0]), toLong(row[1]));
         }
 
         List<ExceptionRecord> recentExceptions = exceptionRecordRepository
-                .findByMerchantIdAndDetectedAtBetween(
+                .findDashboardExceptionsForMerchantBetween(
                         merchantId,
                         from,
                         to,
@@ -143,7 +143,7 @@ public class DashboardService {
             }
         }
 
-        for (Object[] row : exceptionRecordRepository.findDailyExceptionTrendBetween(merchantId, since, until)) {
+        for (Object[] row : exceptionRecordRepository.findDashboardDailyExceptionTrendBetween(merchantId, since, until)) {
             LocalDate date = toLocalDate(row[0]);
             long exceptions = toLong(row[1]);
             if (buckets.containsKey(date)) {
