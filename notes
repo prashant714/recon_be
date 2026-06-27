@@ -1,0 +1,15 @@
+(1) @Order(10): ProviderReportMatchRule    ← Match settlement report lines to transactions
+         │  @Order(20): SettlementTotalRule        ← Verify settlement net total
+         │  @Order(30): UnmatchedOrderRule         ← Orders without payments & vice versa
+         │  @Order(40): ExactIdMatchRule           ← Captured payments with no order reference
+         │  DuplicateCaptureRule                   ← >1 captured payment for same order
+         │  MissingCaptureRule                     ← Payments stuck in AUTHORIZED too long
+         │  OrphanRefundRule                       ← Refunds without parent payments
+
+
+
+         here i think unmatched order and exact id match both are doing the same job, i dont think there is any diff in
+         that , what do you think?
+
+
+

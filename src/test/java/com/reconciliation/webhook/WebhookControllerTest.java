@@ -1,5 +1,6 @@
 package com.reconciliation.webhook;
 
+import com.reconciliation.merchant.entity.Merchant;
 import com.reconciliation.webhook.controller.RazorpayWebhookController;
 import com.reconciliation.webhook.controller.StripeWebhookController;
 import com.reconciliation.config.JwtConfig;
@@ -40,7 +41,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @WebMvcTest(controllers = {RazorpayWebhookController.class, StripeWebhookController.class})
 @Import({WebhookControllerTest.TestConfig.class, RazorpaySignatureService.class, StripeSignatureService.class})
 @TestPropertySource(properties = {
-        "app.razorpay.webhook-secret=razorpay_webhook_secret",
         "app.stripe.webhook-secret=whsec_test_secret"
 })
 class WebhookControllerTest {
@@ -61,7 +61,12 @@ class WebhookControllerTest {
 
     @BeforeEach
     void setUp() {
-        when(merchantRepository.findByStatus("ACTIVE")).thenReturn(List.of());
+        when(merchantRepository.findByStatus("ACTIVE")).thenReturn(List.of(
+                Merchant.builder()
+                        .merchantId("merchant_001")
+                        .webhookSecret("razorpay_webhook_secret")
+                        .status("ACTIVE")
+                        .build()));
     }
 
     @Test

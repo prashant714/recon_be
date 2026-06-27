@@ -24,12 +24,14 @@ public class UserIdentityService {
 
     /**
      * Find or create a user by email or phone.
-     * Uses SERIALIZABLE isolation to prevent duplicate user creation
-     * under concurrent ingestion.
+     * Advisory lock in lockIdentityKeys() serializes concurrent user creation;
+     * DataIntegrityViolationException catch in createUser() handles the edge-case race.
+     * READ_COMMITTED avoids serialization failures when two events for the same payer
+     * arrive simultaneously and both update last_seen_at.
      *
      * Returns null if neither email nor phone is provided (e.g. UPI VPA only).
      */
-    @Transactional(isolation = org.springframework.transaction.annotation.Isolation.SERIALIZABLE)
+    @Transactional
     public Long resolveUserId(String merchantId, String email,
                               String phone, String name) {
         if ((email == null || email.isBlank()) &&
@@ -124,7 +126,7 @@ public class UserIdentityService {
     private String normalizePhone(String phone) {
         if (phone == null || phone.isBlank()) return null;
         // Strip spaces, dashes, dots — keep leading + for international
-        String cleaned = phone.replaceAll("[\\\\s\\\\-\\\\.]", "").trim();
+        String cleaned = phone.replaceAll("[\\s\\-.]", "").trim();
         // Ensure Indian numbers have +91 prefix
         if (cleaned.startsWith("0")) cleaned = "+91" + cleaned.substring(1);
         if (cleaned.length() == 10) cleaned = "+91" + cleaned;

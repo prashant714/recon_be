@@ -1,5 +1,7 @@
 package com.reconciliation.config;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.bucket4j.Bandwidth;
 import io.github.bucket4j.Bucket;
 import io.github.bucket4j.Refill;
@@ -12,43 +14,77 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.time.Duration;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import org.springframework.stereotype.Component;
 
 @Component
 public class RateLimitConfig implements Filter {
 
-    private final Map<String, Bucket> buckets = new ConcurrentHashMap<>();
+    private final Cache<String, Bucket> webhookBuckets = Caffeine.newBuilder()
+            .maximumSize(10_000)
+            .expireAfterAccess(5, TimeUnit.MINUTES)
+            .build();
+
+    private final Cache<String, Bucket> authBuckets = Caffeine.newBuilder()
+            .maximumSize(50_000)
+            .expireAfterAccess(10, TimeUnit.MINUTES)
+            .build();
+
+    private static final String[] AUTH_PATHS = {
+            "/api/v1/merchants/login",
+            "/api/v1/merchants/auth",
+            "/api/v1/merchants/register",
+            "/api/v1/merchants/reset-key",
+            "/api/v1/auth/"
+    };
 
     @Override
     public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
             throws IOException, ServletException {
         HttpServletRequest httpRequest = (HttpServletRequest) request;
         String path = httpRequest.getRequestURI();
-
-        if (!path.startsWith("/webhooks/")) {
-            chain.doFilter(request, response);
-            return;
-        }
-
         String ipAddress = httpRequest.getRemoteAddr();
-        Bucket bucket = buckets.computeIfAbsent(ipAddress, this::newBucket);
 
-        if (bucket.tryConsume(1)) {
-            chain.doFilter(request, response);
-            return;
+        if (path.startsWith("/webhooks/")) {
+            Bucket bucket = webhookBuckets.get(ipAddress, this::newWebhookBucket);
+            if (!bucket.tryConsume(1)) {
+                reject(response);
+                return;
+            }
+        } else if (isAuthPath(path)) {
+            Bucket bucket = authBuckets.get(ipAddress, this::newAuthBucket);
+            if (!bucket.tryConsume(1)) {
+                reject(response);
+                return;
+            }
         }
 
+        chain.doFilter(request, response);
+    }
+
+    private boolean isAuthPath(String path) {
+        for (String authPath : AUTH_PATHS) {
+            if (path.startsWith(authPath)) return true;
+        }
+        return false;
+    }
+
+    private void reject(ServletResponse response) throws IOException {
         HttpServletResponse httpResponse = (HttpServletResponse) response;
         httpResponse.setStatus(429);
         httpResponse.setContentType("application/json");
         httpResponse.getWriter().write("{\"error\":\"Too many requests\"}");
     }
 
-    private Bucket newBucket(String ipAddress) {
+    private Bucket newWebhookBucket(String key) {
         return Bucket.builder()
                 .addLimit(Bandwidth.classic(1000, Refill.intervally(1000, Duration.ofMinutes(1))))
+                .build();
+    }
+
+    private Bucket newAuthBucket(String key) {
+        return Bucket.builder()
+                .addLimit(Bandwidth.classic(20, Refill.intervally(20, Duration.ofMinutes(1))))
                 .build();
     }
 }

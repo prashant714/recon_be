@@ -116,7 +116,8 @@ class RuleBehaviorTest {
                 .eventOccurredAt(OffsetDateTime.now().minusMinutes(30))
                 .build();
 
-        when(repository.findOrphanRefunds(any())).thenReturn(List.of(refund));
+        when(repository.findMerchantIdsWithOrphanRefunds()).thenReturn(List.of("merchant_001"));
+        when(repository.findOrphanRefunds(eq("merchant_001"), any())).thenReturn(List.of(refund));
         when(exceptionRecordService.createForTransaction(any(), any(), eq(3L), any(), any(), any(), any(), any()))
                 .thenReturn(ExceptionRecord.builder().id(44L).build());
 

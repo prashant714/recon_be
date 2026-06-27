@@ -79,6 +79,7 @@ class BankStatementCatchUpJobTest {
         verify(exceptionRecordService).createForBankEntry(
                 eq(ExceptionType.UNMATCHED_BANK_CREDIT),
                 eq(Severity.MEDIUM),
+                eq(1L),
                 eq(48800000L), eq("INR"), any(), eq("merchant_001"));
         verify(bankEntryRepository).save(overdue);
     }

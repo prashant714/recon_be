@@ -1,6 +1,6 @@
-# Reconciliation Platform — Complete Implementation Guide
+# Reconciliation Platform
 
-This document explains every part of the system end-to-end. A reader with no prior knowledge of this codebase should be able to understand what each component does, why it exists, and how everything connects.
+A multi-tenant payment reconciliation system that verifies every payment event is accounted for, matches expected amounts, and confirms that money from payment providers actually arrived in the merchant's bank account.
 
 ---
 
@@ -19,20 +19,21 @@ This document explains every part of the system end-to-end. A reader with no pri
 11. [User Identity Resolution](#11-user-identity-resolution)
 12. [Transaction Upsert Logic](#12-transaction-upsert-logic)
 13. [Order Matching Flow](#13-order-matching-flow)
-14. [Reconciliation Engine](#14-reconciliation-engine)
-15. [Reconciliation Rules Deep Dive](#15-reconciliation-rules-deep-dive)
-16. [Exception Management](#16-exception-management)
-17. [Settlement Reconciliation](#17-settlement-reconciliation)
-18. [Bank Statement Matching](#18-bank-statement-matching)
-19. [Gap Filler — Polling for Missed Events](#19-gap-filler--polling-for-missed-events)
-20. [Admin Operations](#20-admin-operations)
-21. [Dashboard and Metrics](#21-dashboard-and-metrics)
-22. [Audit Logging](#22-audit-logging)
-23. [Scheduled Jobs Summary](#23-scheduled-jobs-summary)
-24. [Data Model](#24-data-model)
-25. [API Reference](#25-api-reference)
-26. [Configuration Reference](#26-configuration-reference)
-27. [Testing Strategy](#27-testing-strategy)
+14. [OMS Integration](#14-oms-integration)
+15. [Reconciliation Engine](#15-reconciliation-engine)
+16. [Reconciliation Rules](#16-reconciliation-rules)
+17. [Exception Management](#17-exception-management)
+18. [Settlement Reconciliation](#18-settlement-reconciliation)
+19. [Bank Statement Matching](#19-bank-statement-matching)
+20. [Gap Filler — Polling for Missed Events](#20-gap-filler--polling-for-missed-events)
+21. [Admin Operations](#21-admin-operations)
+22. [Dashboard and Metrics](#22-dashboard-and-metrics)
+23. [Audit Logging](#23-audit-logging)
+24. [Scheduled Jobs Summary](#24-scheduled-jobs-summary)
+25. [Data Model](#25-data-model)
+26. [API Reference](#26-api-reference)
+27. [Configuration Reference](#27-configuration-reference)
+28. [Testing Strategy](#28-testing-strategy)
 
 ---
 
@@ -45,16 +46,17 @@ Payment providers like Razorpay and Stripe send webhook events whenever somethin
 This platform:
 
 - **Receives** webhook events from Razorpay and Stripe
-- **Verifies** each event's HMAC signature before accepting it
+- **Verifies** each event's HMAC signature using per-merchant webhook secrets before accepting it
 - **Normalizes** provider-specific payloads into a single canonical `Transaction` format
 - **Resolves** the end-user identity behind each transaction
 - **Matches** payments against pre-registered merchant orders with amount tolerance checks
-- **Runs reconciliation rules** on a schedule to flag anomalies (missing captures, orphaned refunds, duplicate charges, settlement discrepancies)
+- **Syncs orders from OMS providers** (Zoho Inventory) via polling, and matches them against incoming payments using a shared order ID
+- **Runs reconciliation rules** on a schedule to flag anomalies (missing captures, orphaned refunds, duplicate charges, settlement discrepancies, cancelled OMS orders with payments)
 - **Matches settlements** against bank statement entries using a three-pass UTR → amount+date → narration strategy
 - **Creates exception records** for every anomaly found
 - **Allows ops teams** to review, resolve, or ignore exceptions
 - **Polls providers** on a schedule to catch any events missed by webhooks
-- **Stores encrypted per-merchant provider credentials** for multi-tenant API polling
+- **Stores encrypted per-merchant provider credentials** for multi-tenant API polling and OMS OAuth2 token management
 - **Provides dashboards** showing match rates, open exceptions, activity feeds, and trend data
 
 ---
@@ -66,11 +68,11 @@ This platform:
 | Language | Java 21 | Uses virtual threads, switch expressions |
 | Framework | Spring Boot 3.2.12 | Web, Security, JPA, Actuator |
 | Database | PostgreSQL 16 | All tables use identity columns |
-| Migrations | Flyway | V1–V19 migrations, runs on startup |
+| Migrations | Flyway | V1–V21 migrations, runs on startup |
 | Scheduling | db-scheduler 14 | Distributed scheduler backed by PostgreSQL — safe for multi-instance deployments |
 | Async | Spring `@Async` with virtual threads | Java 21 virtual threads enabled via `AsyncConfig` |
 | Auth | JWT (jjwt 0.12.5) | Stateless; merchant and admin token types; webhook endpoints are public |
-| Rate Limiting | Bucket4j 8.10.1 | Token bucket, per-IP, webhooks only |
+| Rate Limiting | Bucket4j 8.10.1 + Caffeine 3.1.8 | Token bucket per-IP; Caffeine-backed bounded caches with TTL eviction to prevent memory exhaustion |
 | Razorpay SDK | razorpay-java 1.4.3 | Used for polling |
 | Stripe SDK | stripe-java 25.3.0 | Used for polling |
 | API Docs | SpringDoc OpenAPI 2.3.0 | Available at `/swagger-ui.html` |
@@ -101,22 +103,30 @@ This platform:
 │                           UserIdentityService                       │
 │                           TransactionService.upsert()               │
 │                           OrderMatchingService.matchOnCapture()     │
+│                           relinkOrphanRefunds() [for payments]      │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
 │                       SCHEDULED JOBS                                │
 │                                                                     │
 │  ReconciliationJob (every 5 min) ──► ReconciliationEngine           │
-│                                           │                         │
-│          ┌──────────┬────────────┬────────┼──────────┬──────────┐  │
-│          ▼          ▼            ▼        ▼          ▼          ▼  │
-│   ExactIdMatch  Missing      OrphanRefund Duplicate Settlement Provider│
-│   Rule         Capture                  Capture    Total      Report │
-│                                                               Match  │
+│          │                                                          │
+│          ├── ExactIdMatchRule        (captured, no order reference)  │
+│          ├── MissingCaptureRule      (authorized too long)          │
+│          ├── OrphanRefundRule        (refund, no parent payment)    │
+│          ├── DuplicateCaptureRule    (same order charged twice)     │
+│          ├── SettlementTotalRule     (settlement amount mismatch)   │
+│          ├── ProviderReportMatchRule (report line ↔ transaction)    │
+│          ├── UnmatchedOrderRule      (order ↔ payment gaps)         │
+│          └── OmsOrderCancellationRule(OMS cancelled + has payment)  │
 │                                                                     │
 │  GapFillerJob (every 15 min) ──► RazorpayPollingService             │
 │                               └─► StripePollingService              │
 │                               both feed ──► WebhookIngestionService │
+│                                                                     │
+│  OmsPollingJob (every 15 min) ──► ZohoOmsConnector                  │
+│                               └─► OmsOrderIngestionService          │
+│                                   (upsert Orders, trigger matching) │
 │                                                                     │
 │  SettlementReconcilerJob (2 AM daily) ──► close SETTLED settlements │
 │                                      └─► flag overdue PENDING ones  │
@@ -134,6 +144,7 @@ This platform:
 │  POST /api/v1/merchants/auth      ──► API key → JWT                 │
 │  POST /api/v1/merchants/refresh   ──► extend JWT                    │
 │  POST /api/v1/connections         ──► store encrypted provider creds│
+│  POST /api/v1/connections/oauth   ──► store OAuth2 OMS credentials  │
 │  GET  /api/v1/merchants/me        ──► merchant profile              │
 └─────────────────────────────────────────────────────────────────────┘
 
@@ -185,6 +196,12 @@ src/main/java/com/reconciliation/
 │   ├── repository/OrderRepository.java
 │   └── service/                     # OrderService, OrderMatchingService
 │
+├── oms/                             # OMS (Order Management System) integration
+│   ├── connector/                   # OmsConnector (interface), OmsOrder (DTO)
+│   ├── zoho/                        # ZohoOmsConnector, ZohoApiClient, ZohoTokenManager
+│   ├── service/                     # OmsOrderIngestionService, OmsIngestionResult
+│   └── job/                         # OmsPollingJob
+│
 ├── bank/                            # Bank statement reconciliation
 │   ├── controller/                  # BankStatementController,
 │   │                                # ReconciliationBankStatementController
@@ -205,7 +222,8 @@ src/main/java/com/reconciliation/
 │   ├── controller/ProviderConnectionController.java
 │   ├── entity/ProviderConnection.java
 │   ├── repository/ProviderConnectionRepository.java
-│   └── service/ProviderConnectionService.java
+│   └── service/                     # ProviderConnectionService,
+│                                    # ProviderCredentialVerifier
 │
 ├── user/                            # Payer identity resolution
 │   ├── entity/User.java
@@ -218,7 +236,7 @@ src/main/java/com/reconciliation/
 │   │                                # ExactIdMatchRule, MissingCaptureRule,
 │   │                                # OrphanRefundRule, DuplicateCaptureRule,
 │   │                                # SettlementTotalRule, ProviderReportMatchRule,
-│   │                                # UnmatchedOrderRule
+│   │                                # UnmatchedOrderRule, OmsOrderCancellationRule
 │   └── job/                         # ReconciliationJob, GapFillerJob,
 │                                    # SettlementReconcilerJob, BankStatementCatchUpJob,
 │                                    # SettlementReportSyncJob
@@ -261,18 +279,19 @@ src/main/java/com/reconciliation/
 │   ├── SecurityConfig.java          # JWT + route rules
 │   ├── JwtFilter.java               # Reads Bearer token, sets security context
 │   ├── JwtConfig.java               # Token generation and validation
-│   ├── RateLimitConfig.java         # Bucket4j per-IP rate limiter
+│   ├── RateLimitConfig.java         # Bucket4j + Caffeine per-IP rate limiter
 │   ├── AsyncConfig.java             # Virtual thread executor
 │   ├── SchedulerConfig.java         # db-scheduler bean
+│   ├── OmsConfig.java               # OMS RestTemplate bean
 │   ├── MerchantConfig.java          # Merchant properties binding
 │   └── WebConfig.java               # CORS
 │
 └── common/
-    ├── enums/                       # Provider, EventType, TransactionStatus,
-    │                                # ReconciliationStatus, ExceptionType,
-    │                                # ExceptionStatus, Severity, SettlementStatus,
-    │                                # OrderStatus, BankEntryStatus,
-    │                                # ReportLineMatchStatus,
+    ├── enums/                       # Provider, ProviderType, EventType,
+    │                                # TransactionStatus, ReconciliationStatus,
+    │                                # ExceptionType, ExceptionStatus, Severity,
+    │                                # SettlementStatus, OrderStatus,
+    │                                # BankEntryStatus, ReportLineMatchStatus,
     │                                # BankStatementUploadStatus, ConnectionStatus
     ├── exception/                   # GlobalExceptionHandler, domain exceptions
     └── util/                        # AmountUtils, CurrencyUtils, TimestampUtils,
@@ -287,11 +306,16 @@ Every HTTP request passes through three layers before reaching a controller.
 
 ### Layer 1 — Rate Limit Filter (`RateLimitConfig`)
 
-A standard servlet `Filter` registered as a Spring component. It intercepts requests to `/webhooks/**` only and applies a token-bucket rate limiter per client IP using Bucket4j.
+A servlet `Filter` that applies token-bucket rate limiting per client IP using Bucket4j, backed by Caffeine caches with bounded size and TTL eviction to prevent memory exhaustion.
 
-- Bucket size: **1000 requests per minute** per IP
-- Requests exceeding the limit receive HTTP 429 with `{"error":"Too many requests"}`
-- All non-webhook paths skip this filter entirely
+**Two separate rate limit tiers:**
+
+| Tier | Paths | Limit | Cache size | TTL |
+|---|---|---|---|---|
+| Webhook | `/webhooks/*` | 1,000 req/min per IP | 10,000 entries | 5 minutes |
+| Auth | `/api/v1/merchants/login`, `/auth`, `/register`, `/reset-key`, `/api/v1/auth/*` | 20 req/min per IP | 50,000 entries | 10 minutes |
+
+Requests exceeding the limit receive HTTP 429 with `{"error":"Too many requests"}`. All other paths skip this filter entirely.
 
 ### Layer 2 — JWT Filter (`JwtFilter`)
 
@@ -330,9 +354,9 @@ Webhook controllers perform HMAC verification before any processing.
 
 **Razorpay** (`RazorpaySignatureService`):
 - Computes `HMAC-SHA256(rawBody, webhookSecret)` and hex-encodes it
-- Resolves the matching merchant by checking per-merchant webhook secrets, then falls back to the default secret
+- Resolves the matching merchant by iterating all active merchants and checking each one's stored webhook secret
 - Compares with the `X-Razorpay-Signature` header using constant-time comparison (`MessageDigest.isEqual`)
-- Returns HTTP 400 if verification fails
+- Returns HTTP 400 if no merchant's secret matches
 
 **Stripe** (`StripeSignatureService`):
 - Reads the `Stripe-Signature` header (contains timestamp + signatures)
@@ -429,7 +453,14 @@ All authenticated API endpoints extract `merchantId` from the JWT to scope data 
 
 ## 7. Provider Connections
 
-Merchants store their Razorpay and Stripe API credentials in the platform so that polling jobs and admin-triggered polls can authenticate against the provider APIs on a per-merchant basis.
+Merchants store their provider API credentials so that polling jobs and admin-triggered polls can authenticate against provider APIs on a per-merchant basis.
+
+### Two types of connections
+
+| Type | Providers | Auth model | Endpoint |
+|---|---|---|---|
+| API Key + Secret | Razorpay, Stripe | Stored encrypted, decrypted at poll time | `POST /api/v1/connections` |
+| OAuth2 | Zoho Inventory | Client ID + Client Secret + Refresh Token, access token auto-refreshed | `POST /api/v1/connections/oauth` |
 
 ### ProviderConnection Entity
 
@@ -437,19 +468,23 @@ Merchants store their Razorpay and Stripe API credentials in the platform so tha
 |---|---|---|
 | `id` | bigint PK | Auto-generated |
 | `merchantId` | varchar(60) | Owner merchant |
-| `provider` | varchar(30) | `razorpay` or `stripe` |
-| `apiKeyEncrypted` | text | AES-encrypted API key |
-| `secretEncrypted` | text | AES-encrypted API secret |
+| `provider` | varchar(30) | `razorpay`, `stripe`, or `zoho_inventory` |
+| `providerType` | enum | `PAYMENT` or `OMS` (default `PAYMENT`) |
+| `apiKeyEncrypted` | text | AES-encrypted API key / OAuth2 client ID (nullable for OAuth-only) |
+| `secretEncrypted` | text | AES-encrypted API secret / OAuth2 client secret (nullable) |
 | `apiKeyMasked` | varchar | First 4 + `****` + last 4 chars (for display) |
+| `refreshTokenEncrypted` | text | AES-encrypted OAuth2 refresh token |
+| `accessTokenEncrypted` | text | AES-encrypted OAuth2 access token (cached) |
+| `tokenExpiresAt` | timestamptz | When the cached access token expires |
+| `organizationId` | varchar(120) | OMS organization/tenant ID (e.g. Zoho org ID) |
 | `status` | enum | `ACTIVE` or `DISABLED` |
 | `createdAt` | timestamptz | |
 | `updatedAt` | timestamptz | |
 
 Unique constraint on `(merchantId, provider)` — one connection per provider per merchant.
 
-### API
+### API — Payment provider connections
 
-**Save/update connection:**
 ```
 POST /api/v1/connections
 {
@@ -458,7 +493,21 @@ POST /api/v1/connections
   "secret": "xxxxx"
 }
 ```
-Encrypts credentials using `EncryptionService` (AES) before storage. If a connection already exists for the provider, it is updated.
+
+### API — OAuth2 OMS connections
+
+```
+POST /api/v1/connections/oauth
+{
+  "provider": "zoho_inventory",
+  "clientId": "1000.XXXX",
+  "clientSecret": "yyy",
+  "refreshToken": "1000.zzz",
+  "organizationId": "12345678"
+}
+```
+
+Both encrypt credentials using `EncryptionService` (AES-256-GCM) before storage and verify credentials with the provider before saving. If a connection already exists for the provider, it is updated.
 
 **List connections:**
 ```
@@ -468,11 +517,8 @@ Returns connections with masked API keys (never exposes plaintext or encrypted v
 
 ### Usage in Polling
 
-The `GapFillerJob` and `AdminService.poll()` use `ProviderConnectionService` to:
-1. Find all active connections for a given provider
-2. Decrypt the API key and secret at runtime
-3. Initialize the provider SDK client with per-merchant credentials
-4. Poll for missed events scoped to that merchant
+- **Payment polling (GapFillerJob, AdminService):** Iterates active connections where `providerType = PAYMENT`, decrypts API key and secret, polls the provider API
+- **OMS polling (OmsPollingJob):** Iterates active connections where `providerType = OMS`, dispatches to the matching `OmsConnector` implementation
 
 ---
 
@@ -486,7 +532,7 @@ This is the entry point for all payment events, whether they arrive via live web
 Provider  ──POST──►  WebhookController
                           │
                     verify HMAC signature
-                    (resolve merchantId from webhook secret)
+                    (resolve merchantId by checking per-merchant secrets)
                           │ (fail → 400)
                           │ (pass → continue)
                           ▼
@@ -573,6 +619,12 @@ processAsync(webhookEventId, provider)
    if status == CAPTURED:
         └──► OrderMatchingService.matchOnCapture(savedTransaction)
                     │ (match against pre-registered orders)
+        │
+   if eventType == PAYMENT:
+        └──► relinkOrphanRefunds(savedTransaction)
+                    │ (find orphan refunds for same merchant,
+                    │  check if raw payload references this payment,
+                    │  link them, auto-close ORPHAN_REFUND exceptions)
         │
    UserIdentityService.incrementAggregates(userId, amount, isFailed)
         │ (atomic update of user's txn count, total amount, fail count)
@@ -760,22 +812,36 @@ find existing by (provider, providerTransactionId)
 
 The order domain allows merchants to pre-register expected payment amounts for each order. When a payment is captured, the platform automatically matches it against the correct order and flags any amount discrepancies.
 
+Orders can come from two sources:
+1. **Direct API** — merchants call `POST /api/v1/orders` to pre-register orders
+2. **OMS connectors** — orders are automatically synced from systems like Zoho Inventory (see [OMS Integration](#14-oms-integration))
+
 ### Order entity
 
 An `Order` represents a merchant-created expectation:
 - `orderId` — merchant's internal order reference (unique per merchant)
-- `providerOrderId` — provider-assigned order ID (e.g., Razorpay `order_` ID)
+- `providerOrderId` — provider-assigned order ID (e.g., Razorpay `order_` ID, or `zoho:{id}` for OMS)
 - `expectedAmount` — the amount the merchant expects to collect
 - `orderStatus` — `CREATED → PAYMENT_RECEIVED / OVERPAID / UNDERPAID / CANCELLED / REFUNDED`
 - `transactionId` — FK to the matched `Transaction` once payment is received
 - `amountMatched` — boolean flag indicating whether amounts match
 - `discrepancyAmount` — difference between `expectedAmount` and actual payment
+- `omsProvider` — which OMS synced this order (null for manual/API orders)
+- `omsOrderStatus` — raw status from the OMS (e.g., "confirmed", "fulfilled")
+- `omsSyncedAt` — last time this order was synced from the OMS
+- `omsRawPayload` — full raw JSON from the OMS (stored as JSONB)
+
+### How OMS orders match payments
+
+Matching relies on a shared order ID. The merchant puts their OMS order number (e.g., Zoho's `salesorder_number`) into Razorpay's `reference_id` or `notes.order_id` when creating a payment link. When the payment webhook arrives, the order ID flows through normalization into `Transaction.orderId`, and `OrderMatchingService` matches it against the OMS-synced `Order.orderId`.
+
+There is no fuzzy matching. If the order ID doesn't match exactly, no match happens.
 
 ### Two-way matching
 
 `OrderMatchingService` handles matching in both directions, so order and payment can arrive in any sequence.
 
-**Direction 1: Payment captured first, then order registered**
+**Direction 1: Payment captured first, then order registered (or synced from OMS)**
 
 ```
 OrderMatchingService.matchOnCapture(transaction)
@@ -813,13 +879,78 @@ OrderMatchingService.matchOnOrderCreation(order)
 
 Configurable via `app.order-matching.amount-tolerance-paisa` (default 100 paisa = ₹1). Applied symmetrically: `|txnAmount - expectedAmount| ≤ tolerance` is considered a match.
 
-### Grace window
+### Grace windows
 
-`app.order-matching.payment-grace-minutes` (default 30) and `app.order-matching.order-grace-minutes` (default 15) define how long the system waits before treating an unmatched order as stale.
+| Order source | Grace period | Config key | Default |
+|---|---|---|---|
+| Direct API orders | Payment grace | `app.order-matching.payment-grace-minutes` | 30 min |
+| OMS-synced orders | Payment grace | `app.oms.payment-grace-minutes` | 1440 min (24h) |
+| Payments (no order) | Order grace | `app.order-matching.order-grace-minutes` | 15 min |
+
+OMS orders get a longer grace period because they may be created well before the customer initiates payment.
 
 ---
 
-## 14. Reconciliation Engine
+## 14. OMS Integration
+
+The platform integrates with Order Management Systems to automatically pull orders instead of requiring merchants to register them via API. OMS connectors are **separate from the payment pipeline** — they produce `Order` objects, not `Transaction` objects.
+
+### How it works
+
+```
+Zoho Inventory API
+        │
+   ZohoOmsConnector.fetchOrders(connection, from, to)
+        │
+   ZohoApiClient  ──►  paginated GET /inventory/v1/salesorders
+        │                (200 per page, retry with backoff, auto token refresh)
+        │
+   Map each sales order to OmsOrder DTO:
+        salesorder_number  →  orderId
+        salesorder_id      →  providerOrderId (prefixed "zoho:")
+        total              →  expectedAmount (converted to paisa)
+        currency_code      →  currency
+        status             →  omsStatus
+        │
+   OmsOrderIngestionService.ingest(merchantId, provider, orders)
+        │
+   For each OmsOrder:
+        ├── draft/void status → skip
+        ├── order doesn't exist → create Order, call tryMatchByOrder()
+        ├── order exists + OMS-synced → update OMS fields (status, amount if still CREATED)
+        └── order exists + manually created → skip (manual takes priority)
+```
+
+### OMS Polling Job
+
+`OmsPollingJob` is a db-scheduler `RecurringTask` that runs every 15 minutes (configurable via `app.oms.polling-interval-minutes`). It:
+
+1. Finds all active `ProviderConnection` records where `providerType = OMS`
+2. Dispatches each to the matching `OmsConnector` by provider name
+3. Feeds results into `OmsOrderIngestionService`
+4. Tracks `oms.orders.synced` as a Micrometer counter
+
+### Zoho OAuth2 Token Management
+
+Zoho uses OAuth2 with refresh tokens. `ZohoTokenManager` handles the token lifecycle:
+
+- Access tokens expire after 1 hour
+- Refreshes via `POST https://accounts.zoho.com/oauth/v2/token`
+- Caches the encrypted access token + expiry in `ProviderConnection`
+- Uses per-connection `ReentrantLock` for thread safety
+- On 401 during API calls, ZohoApiClient triggers a token refresh and retries
+
+### Supported OMS Providers
+
+| Provider | Connector class | Status |
+|---|---|---|
+| Zoho Inventory | `ZohoOmsConnector` | Implemented |
+
+Adding a new OMS provider requires implementing the `OmsConnector` interface (`getProvider()`, `fetchOrders()`, `testConnection()`) and registering it as a Spring `@Component`. The polling job discovers connectors automatically.
+
+---
+
+## 15. Reconciliation Engine
 
 `ReconciliationEngine.runAll()` executes all reconciliation rules in sequence. Rules are Spring beans implementing the `ReconciliationRule` interface, so new rules are picked up automatically by Spring's dependency injection without any registration step.
 
@@ -840,168 +971,180 @@ public interface ReconciliationRule {
 
 ---
 
-## 15. Reconciliation Rules Deep Dive
+## 16. Reconciliation Rules
 
-### ExactIdMatchRule
+The platform runs 8 rules every 5 minutes. Each rule scans for a specific type of anomaly and creates an exception record when it finds one. Rules are idempotent — running the same rule twice won't create duplicate exceptions.
 
-**Purpose:** Flag captured payments that have no order reference and cannot be reconciled automatically.
-
-**Candidates:** Transactions with `status=CAPTURED` AND `reconciliationStatus=PENDING_SETTLEMENT` AND `eventOccurredAt < now - 5 minutes`.
-
-**Logic:**
-- If the transaction has a non-blank `providerOrderId` → **skip** (already handled by `OrderMatchingService` at ingestion time)
-- If `providerOrderId` is missing → create `UNMATCHED_PAYMENT` exception (MEDIUM severity), mark `reconciliationStatus=EXCEPTION`
-
-This rule does **not** promote transactions to `MATCHED` — that happens via `OrderMatchingService` (on capture) or `ProviderReportMatchRule` (on settlement report sync). This rule only catches payments that slipped through without any order reference.
-
-**Why 5-minute delay?** A payment captured right now may still be receiving supplemental data (like order ID) from a second event arriving within seconds.
+Here's what each rule catches, when it fires, and what happens when it does.
 
 ---
 
-### MissingCaptureRule
+### Rule 1: ExactIdMatchRule
 
-**Purpose:** Flag payments stuck in `AUTHORIZED` for too long, indicating a likely auto-expiry or missed capture.
+> **Catches:** Captured payments that have no order reference — they can't be matched to any merchant order.
 
-**Candidates:** Transactions with `status=AUTHORIZED` AND `eventOccurredAt < now - 24 hours` (configurable via `app.reconciliation.missing-capture-threshold-hours`).
+| | |
+|---|---|
+| **Looks at** | Transactions where `status = CAPTURED`, `reconciliationStatus = PENDING_SETTLEMENT`, and older than 5 minutes |
+| **Fires when** | The transaction has no `providerOrderId` (no order reference at all) |
+| **Skips when** | `providerOrderId` is present (already handled by OrderMatchingService) |
+| **Creates** | `UNMATCHED_PAYMENT` exception, severity MEDIUM |
+| **Also does** | Sets transaction's `reconciliationStatus → EXCEPTION` |
 
-**On match:** Creates `MISSING_CAPTURE` exception (HIGH severity), sets `reconciliationStatus=EXCEPTION`, and links the exception ID to the transaction.
-
----
-
-### OrphanRefundRule
-
-**Purpose:** Flag refunds that could not be linked to a parent payment.
-
-**Candidates:** Transactions with `eventType=REFUND` AND `parentTransactionId IS NULL` AND `eventOccurredAt < now - 10 minutes`.
-
-**On match:** Creates `ORPHAN_REFUND` exception (HIGH severity), sets `reconciliationStatus=EXCEPTION`, and links the exception ID to the transaction.
-
-**Why 10-minute grace?** The parent payment and the refund may arrive very close together. The 10-minute window allows the parent to be saved before the rule runs.
+**Why the 5-minute delay?** A payment captured right now may still be receiving supplemental data (like order ID) from a second webhook event arriving within seconds.
 
 ---
 
-### DuplicateCaptureRule
+### Rule 2: MissingCaptureRule
 
-**Purpose:** Detect the same order being charged more than once.
+> **Catches:** Payments stuck in "authorized" state for too long — the merchant likely forgot to capture, or auto-capture failed.
 
-**Candidates:** `(merchantId, orderId)` groups where more than one `CAPTURED` payment exists for the same order.
+| | |
+|---|---|
+| **Looks at** | Transactions where `status = AUTHORIZED` and older than 24 hours |
+| **Fires when** | Always (any authorized payment past the threshold is suspicious) |
+| **Creates** | `MISSING_CAPTURE` exception, severity HIGH |
+| **Also does** | Sets `reconciliationStatus → EXCEPTION` |
 
-**Logic:** Query groups that have `COUNT > 1`, then for every transaction in that group: create a `DUPLICATE_CAPTURE` exception (CRITICAL severity), set `reconciliationStatus=EXCEPTION`, and link the exception ID.
-
----
-
-### SettlementTotalRule
-
-**Purpose:** Verify that the sum of net amounts for all transactions in a settlement matches the settlement's declared `netAmount`.
-
-**Candidates:** Settlements with `settlementStatus=SETTLED`.
-
-**Pre-condition — Provider report readiness:** The rule first checks whether the settlement's provider report lines are fully synced and matched. It skips the settlement if:
-- No report lines exist yet (report not synced)
-- Any report lines are still `PENDING` (ProviderReportMatchRule hasn't run yet)
-- Line count is less than the expected `transactionCount`
-
-**Logic (once report is ready):**
-```
-transactionSum = SUM(netAmount) WHERE settlementId = settlement.providerSettlementId
-diff = ABS(settlement.netAmount - transactionSum)
-
-if diff > tolerance (default 100 paisa):
-    create SETTLEMENT_DISCREPANCY exception (CRITICAL)
-    mark settlementStatus = DISCREPANT
-
-else if bank credit is confirmed (bankCreditAmount and bankCreditDate are set):
-    mark settlementStatus = MATCHED_TO_BANK
-
-else:
-    log "totals verified, awaiting bank credit confirmation"
-```
-
-The tolerance (default 100 paisa = ₹1) is configurable via `app.reconciliation.amount-tolerance-paisa`.
+The 24-hour threshold is configurable via `app.reconciliation.missing-capture-threshold-hours`.
 
 ---
 
-### ProviderReportMatchRule
+### Rule 3: OrphanRefundRule
 
-**Purpose:** Verify that every line in a provider's settlement report (`SettlementReportLine`) maps to a known transaction in the system with matching amounts.
+> **Catches:** Refunds that couldn't be linked to a parent payment — the original payment may be missing from our system.
 
-**Candidates:** `SettlementReportLine` records with `matchStatus=PENDING`.
+| | |
+|---|---|
+| **Looks at** | Transactions where `eventType = REFUND`, `parentTransactionId IS NULL`, and older than 10 minutes |
+| **Fires when** | The refund has no linked parent payment after the grace period |
+| **Creates** | `ORPHAN_REFUND` exception, severity HIGH |
+| **Also does** | Sets `reconciliationStatus → EXCEPTION` |
 
-**Logic — three outcomes per line:**
+**Why 10 minutes?** The parent payment and refund may arrive very close together via separate webhooks. The grace window lets the parent arrive first. When a new payment is processed, `TransactionProcessingService.relinkOrphanRefunds()` automatically checks for orphan refunds that reference it and links them, closing any existing `ORPHAN_REFUND` exceptions.
 
-```
-Look up Transaction by (provider, providerTxnId):
-
-NOT FOUND:
-    line.matchStatus = NOT_FOUND_IN_DB
-    create PROVIDER_REPORT_MISMATCH exception (HIGH)
-
-FOUND + amounts match (within tolerance):
-    line.matchStatus = MATCHED
-    line.matchedToTxnId = transaction.id
-    transaction.reconciliationStatus = MATCHED
-    transaction.settlementId = settlement.providerSettlementId
-
-FOUND + amounts differ:
-    line.matchStatus = AMOUNT_MISMATCH
-    create PROVIDER_REPORT_MISMATCH exception (HIGH)
-    transaction.reconciliationStatus = EXCEPTION
-```
-
-This rule is the primary path that promotes transactions to `MATCHED` status — it confirms that the provider's settlement report agrees with our transaction records. It also catches cases where a provider credits an amount for a transaction the platform never received via webhook or polling.
+**Scoping:** Orphan refunds are queried per-merchant to avoid cross-merchant data leaks.
 
 ---
 
-### UnmatchedOrderRule
+### Rule 4: DuplicateCaptureRule
 
-**Purpose:** Detect mismatches between orders and payments in both directions — orders without payments and payments without orders.
+> **Catches:** The same order being charged more than once — a customer was double-billed.
 
-**Check 1 — Orders with no payment:**
-
-**Candidates:** Orders with `orderStatus=CREATED` AND `createdAt < now - 30 minutes` (configurable via `app.order-matching.payment-grace-minutes`).
-
-**On match:** Creates `MISSING_PAYMENT` exception (HIGH severity). This alerts ops that a customer's order has no corresponding captured payment — either the payment was missed, the webhook was lost, or the customer abandoned checkout.
-
-**Check 2 — Payments with no pre-registered order:**
-
-**Candidates:** Captured transactions that have a `providerOrderId` but no matching pre-registered `Order` in our system, AND `eventOccurredAt < now - 15 minutes` (configurable via `app.order-matching.order-grace-minutes`).
-
-**On match:** Creates `UNREGISTERED_PAYMENT` exception (MEDIUM severity), sets `reconciliationStatus=EXCEPTION`. This catches payments where the merchant's system processed a charge but never called our order registration API.
+| | |
+|---|---|
+| **Looks at** | Groups of `(merchantId, orderId)` where more than one `CAPTURED` transaction exists |
+| **Fires when** | A group has COUNT > 1 |
+| **Creates** | `DUPLICATE_CAPTURE` exception for **every** transaction in the group, severity CRITICAL |
+| **Also does** | Sets `reconciliationStatus → EXCEPTION` on all affected transactions |
 
 ---
 
-### ExceptionRecord deduplication
+### Rule 5: SettlementTotalRule
 
-`ExceptionRecordService.createForTransaction()` checks whether an OPEN or IN_REVIEW exception of the same `(type, transactionId)` already exists before creating a new one. This prevents the engine from creating duplicate exceptions on every 5-minute run.
+> **Catches:** Settlement amount mismatches — the sum of individual transaction amounts doesn't match what the provider declared for the settlement.
 
-For order-level exceptions (`createForOrderAlert`), deduplication checks for an existing exception matching `(type, merchantId, description containing orderId)`. The `transactionId` is stored as null since no single transaction is involved.
+| | |
+|---|---|
+| **Looks at** | Settlements where `settlementStatus = SETTLED` |
+| **Skips when** | Provider report lines aren't fully synced yet, or any lines are still PENDING, or line count < expected `transactionCount` |
+| **Fires when** | `ABS(settlement.netAmount - SUM(transactions.netAmount)) > tolerance` |
+| **Creates** | `SETTLEMENT_DISCREPANCY` exception, severity CRITICAL |
+| **Also does** | Sets `settlementStatus → DISCREPANT` |
+| **On clean match** | If bank credit is confirmed, sets `settlementStatus → MATCHED_TO_BANK` |
+
+The tolerance defaults to 100 paisa (₹1), configurable via `app.reconciliation.amount-tolerance-paisa`.
 
 ---
 
-## 16. Exception Management
+### Rule 6: ProviderReportMatchRule
+
+> **Catches:** Mismatches between what the provider's settlement report says and what we have in our system.
+
+This is the primary rule that promotes transactions to `MATCHED` status — it confirms that the provider's settlement report agrees with our records.
+
+| | |
+|---|---|
+| **Looks at** | `SettlementReportLine` records where `matchStatus = PENDING` |
+| **Three outcomes per line:** | |
+
+| Outcome | Condition | Action |
+|---|---|---|
+| **Matched** | Transaction found, amounts agree | Line → `MATCHED`, transaction → `reconciliationStatus = MATCHED` |
+| **Amount mismatch** | Transaction found, amounts differ | Line → `AMOUNT_MISMATCH`, creates `PROVIDER_REPORT_MISMATCH` exception (HIGH), transaction → `EXCEPTION` |
+| **Not found** | No transaction for this provider txn ID | Line → `NOT_FOUND_IN_DB`, creates `PROVIDER_REPORT_MISMATCH` exception (HIGH) |
+
+---
+
+### Rule 7: UnmatchedOrderRule
+
+> **Catches:** Gaps between orders and payments in both directions.
+
+This rule runs two checks with separate logic and grace periods:
+
+**Check A — Orders waiting for payment:**
+
+| | |
+|---|---|
+| **Looks at** | Orders where `orderStatus = CREATED` and past the grace period |
+| **Grace periods** | Direct API orders: 30 min (`app.order-matching.payment-grace-minutes`). OMS-synced orders: 24 hours (`app.oms.payment-grace-minutes`), at MEDIUM severity instead of HIGH |
+| **Creates** | `MISSING_PAYMENT` exception |
+
+**Check B — Payments with no pre-registered order:**
+
+| | |
+|---|---|
+| **Looks at** | Captured transactions with a `providerOrderId` but no matching `Order`, older than 15 min |
+| **Creates** | `UNREGISTERED_PAYMENT` exception, severity MEDIUM |
+| **Also does** | Sets `reconciliationStatus → EXCEPTION` |
+
+---
+
+### Rule 8: OmsOrderCancellationRule
+
+> **Catches:** OMS orders that were cancelled after a payment was already matched — a refund may be needed.
+
+| | |
+|---|---|
+| **Looks at** | Orders where `omsProvider IS NOT NULL`, `orderStatus = CANCELLED`, and `transactionId IS NOT NULL` |
+| **Fires when** | An OMS-synced order was cancelled but already has a linked payment |
+| **Creates** | `OMS_ORDER_CANCELLED_WITH_PAYMENT` exception, severity HIGH |
+
+This rule is only relevant for OMS-synced orders. It alerts ops that a refund may need to be issued because the order was cancelled in the OMS after the customer already paid.
+
+---
+
+### Deduplication
+
+All rules are safe to run repeatedly. `ExceptionRecordService` checks whether an OPEN or IN_REVIEW exception of the same `(type, transactionId)` already exists before creating a new one. For order-level exceptions, deduplication uses `(type, merchantId, orderId)`. For bank entry exceptions, deduplication uses `(type, bankEntryId)`.
+
+---
+
+## 17. Exception Management
 
 An `ExceptionRecord` represents an anomaly detected by the reconciliation engine or the bank statement matching process.
 
 ### Exception types
 
-| Type | Created by | Severity |
-|---|---|---|
-| `UNMATCHED_PAYMENT` | ExactIdMatchRule (no providerOrderId on captured payment) | MEDIUM |
-| `UNMATCHED_REFUND` | Refund matching | MEDIUM |
-| `MISSING_CAPTURE` | MissingCaptureRule (AUTHORIZED > 24h) | HIGH |
-| `ORPHAN_REFUND` | OrphanRefundRule (refund with no parent payment) | HIGH |
-| `DUPLICATE_CAPTURE` | DuplicateCaptureRule (same order charged twice) | CRITICAL |
-| `SETTLEMENT_DISCREPANCY` | SettlementTotalRule (amount mismatch), SettlementReconcilerJob (overdue) | CRITICAL / HIGH |
-| `PROVIDER_REPORT_MISMATCH` | ProviderReportMatchRule (txn not found or amount differs) | HIGH |
-| `ORDER_AMOUNT_MISMATCH` | OrderMatchingService (overpaid or underpaid) | HIGH |
-| `AMOUNT_MISMATCH` | General amount discrepancy checks | MEDIUM |
-| `MISSING_PAYMENT` | UnmatchedOrderRule (order registered but no payment received) | HIGH |
-| `UNREGISTERED_PAYMENT` | UnmatchedOrderRule (payment captured but no order registered) | MEDIUM |
-| `STATUS_MISMATCH` | Status inconsistency checks | MEDIUM |
-| `FEE_DISCREPANCY` | Fee verification | MEDIUM |
-| `BANK_AMOUNT_MISMATCH` | BankStatementMatchingService (UTR/narration matched but amounts differ) | CRITICAL |
-| `UNMATCHED_BANK_CREDIT` | BankStatementCatchUpJob (bank credit with no matching settlement) | MEDIUM |
-| `OVERDUE_BANK_CREDIT` | BankStatementCatchUpJob, SettlementReconcilerJob (settlement without bank confirmation) | HIGH |
+| Type | Created by | Severity | What it means |
+|---|---|---|---|
+| `UNMATCHED_PAYMENT` | ExactIdMatchRule | MEDIUM | Captured payment has no order reference |
+| `UNMATCHED_REFUND` | Refund matching | MEDIUM | Refund couldn't be matched |
+| `MISSING_CAPTURE` | MissingCaptureRule | HIGH | Payment authorized but never captured (>24h) |
+| `ORPHAN_REFUND` | OrphanRefundRule | HIGH | Refund with no parent payment |
+| `DUPLICATE_CAPTURE` | DuplicateCaptureRule | CRITICAL | Same order charged twice |
+| `SETTLEMENT_DISCREPANCY` | SettlementTotalRule, SettlementReconcilerJob | CRITICAL / HIGH | Settlement amount doesn't match transactions, or settlement overdue |
+| `PROVIDER_REPORT_MISMATCH` | ProviderReportMatchRule | HIGH | Provider report line doesn't match our records |
+| `ORDER_AMOUNT_MISMATCH` | OrderMatchingService | HIGH | Payment amount differs from expected order amount |
+| `AMOUNT_MISMATCH` | General checks | MEDIUM | Generic amount discrepancy |
+| `MISSING_PAYMENT` | UnmatchedOrderRule | HIGH / MEDIUM | Order has no payment after grace period |
+| `UNREGISTERED_PAYMENT` | UnmatchedOrderRule | MEDIUM | Payment captured but no order registered |
+| `STATUS_MISMATCH` | Status checks | MEDIUM | Status inconsistency |
+| `FEE_DISCREPANCY` | Fee verification | MEDIUM | Fee mismatch |
+| `BANK_AMOUNT_MISMATCH` | BankStatementMatchingService | CRITICAL | UTR matched but amounts differ |
+| `UNMATCHED_BANK_CREDIT` | BankStatementCatchUpJob | MEDIUM | Bank credit with no matching settlement |
+| `OVERDUE_BANK_CREDIT` | BankStatementCatchUpJob, SettlementReconcilerJob | HIGH | Settlement without bank confirmation |
+| `OMS_ORDER_CANCELLED_WITH_PAYMENT` | OmsOrderCancellationRule | HIGH | OMS order cancelled but payment was already made |
 
 ### Exception lifecycle
 
@@ -1048,7 +1191,7 @@ X-Actor: ops-engineer-1
 
 ---
 
-## 17. Settlement Reconciliation
+## 18. Settlement Reconciliation
 
 Settlements represent the bank transfer from Razorpay or Stripe to the merchant. Each settlement groups multiple transactions. A settlement also carries a detailed line-item report (`SettlementReportLine`) from the provider.
 
@@ -1119,7 +1262,7 @@ Syncs provider settlement report lines for all `SETTLED` or `DISCREPANT` Razorpa
 
 ---
 
-## 18. Bank Statement Matching
+## 19. Bank Statement Matching
 
 Bank statement entries represent individual credit/debit lines uploaded from the merchant's bank portal. The platform matches these entries to provider settlements using a three-pass strategy. This closes the full reconciliation loop: webhook → transaction → settlement → bank.
 
@@ -1287,7 +1430,7 @@ The `BankStatementCatchUpJob` (daily at 9 AM) handles two overdue scenarios:
 
 ---
 
-## 19. Gap Filler — Polling for Missed Events
+## 20. Gap Filler — Polling for Missed Events
 
 Webhooks can be missed due to network issues, provider outages, or misconfigured endpoints. The Gap Filler job compensates by periodically polling the provider APIs for recent events.
 
@@ -1352,7 +1495,7 @@ Metrics: `polling.gaps.filled` counter tracks how many events were picked up by 
 
 ---
 
-## 20. Admin Operations
+## 21. Admin Operations
 
 All admin endpoints are under `/api/v1/admin` and require a valid JWT. They accept an `X-Actor` header to identify who triggered the action (used in audit logs).
 
@@ -1436,7 +1579,7 @@ Traces the lifecycle of a transaction through every processing stage for debuggi
 
 ---
 
-## 21. Dashboard and Metrics
+## 22. Dashboard and Metrics
 
 ### Summary endpoint
 
@@ -1504,10 +1647,11 @@ Available at `GET /actuator/prometheus`:
 | `reconciliation.exceptions.created` | Counter | Total exceptions created by the engine |
 | `reconciliation.run.duration` | Timer | Time taken for a full engine run |
 | `polling.gaps.filled` | Counter | Events fetched by gap-filler polling |
+| `oms.orders.synced` | Counter | Orders synced from OMS providers |
 
 ---
 
-## 22. Audit Logging
+## 23. Audit Logging
 
 `AuditService.log()` creates an immutable `AuditLog` record for every sensitive operation.
 
@@ -1536,23 +1680,24 @@ Available at `GET /actuator/prometheus`:
 
 ---
 
-## 23. Scheduled Jobs Summary
+## 24. Scheduled Jobs Summary
 
 All jobs use [db-scheduler](https://github.com/kagkarlsson/db-scheduler), a persistent distributed scheduler backed by a PostgreSQL table (`scheduled_tasks`). This ensures that in a multi-instance deployment, each job runs exactly once.
 
 | Job | Schedule | Purpose |
 |---|---|---|
-| `ReconciliationJob` | Every 5 minutes | Runs all reconciliation rules |
-| `GapFillerJob` | Every 15 minutes | Polls Razorpay (per-merchant) + Stripe for missed events |
+| `ReconciliationJob` | Every 5 minutes | Runs all 8 reconciliation rules |
+| `GapFillerJob` | Every 15 minutes | Polls Razorpay (per-merchant) + Stripe for missed payment events |
+| `OmsPollingJob` | Every 15 minutes | Polls OMS providers (Zoho) for order updates |
 | `SettlementReconcilerJob` | Daily at 2 AM | Closes settled settlements; flags overdue pending ones |
 | `SettlementReportSyncJob` | Every 2 hours | Syncs provider settlement report lines into `settlement_report_lines` |
 | `BankStatementCatchUpJob` | Daily at 9 AM | Retries matching for `PENDING` bank entries; flags overdue entries and settlements |
 
 ---
 
-## 24. Data Model
+## 25. Data Model
 
-Flyway manages 19 versioned migrations (V1–V19). All primary keys are `bigint GENERATED ALWAYS AS IDENTITY`. All timestamps are `timestamptz` stored in UTC.
+Flyway manages 21 versioned migrations (V1–V21). All primary keys are `bigint GENERATED ALWAYS AS IDENTITY`. All timestamps are `timestamptz` stored in UTC.
 
 ### Table: `webhook_events`
 
@@ -1617,7 +1762,7 @@ Flyway manages 19 versioned migrations (V1–V19). All primary keys are `bigint 
 | `id` | bigint PK | |
 | `merchant_id` | varchar(60) | |
 | `order_id` | varchar(120) | Merchant's order ref, UNIQUE with merchant |
-| `provider_order_id` | varchar(120) | Provider's order ID |
+| `provider_order_id` | varchar(120) | Provider's order ID (e.g. `zoho:12345`) |
 | `expected_amount` | bigint | Amount merchant expects to receive |
 | `currency` | char(3) | |
 | `order_status` | enum | `CREATED`, `PAYMENT_RECEIVED`, `OVERPAID`, `UNDERPAID`, `CANCELLED`, `REFUNDED` |
@@ -1625,6 +1770,10 @@ Flyway manages 19 versioned migrations (V1–V19). All primary keys are `bigint 
 | `amount_matched` | boolean | Whether amounts matched within tolerance |
 | `discrepancy_amount` | bigint | `actual - expected` amount |
 | `metadata` | jsonb | Arbitrary merchant metadata |
+| `oms_provider` | varchar(30) | Which OMS synced this order (null for manual/API) |
+| `oms_order_status` | varchar(60) | Raw status from OMS (e.g. "confirmed") |
+| `oms_synced_at` | timestamptz | Last OMS sync time |
+| `oms_raw_payload` | jsonb | Full raw JSON from OMS |
 | `matched_at` | timestamptz | When match was found |
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
@@ -1669,10 +1818,15 @@ Flyway manages 19 versioned migrations (V1–V19). All primary keys are `bigint 
 |---|---|---|
 | `id` | bigint PK | |
 | `merchant_id` | varchar(60) | UNIQUE with provider |
-| `provider` | varchar(30) | `razorpay` or `stripe` |
-| `api_key_encrypted` | text | AES-encrypted API key |
-| `secret_encrypted` | text | AES-encrypted API secret |
+| `provider` | varchar(30) | `razorpay`, `stripe`, or `zoho_inventory` |
+| `provider_type` | varchar(20) | `PAYMENT` or `OMS` (default `PAYMENT`) |
+| `api_key_encrypted` | text | AES-encrypted API key / OAuth2 client ID (nullable) |
+| `secret_encrypted` | text | AES-encrypted API secret / client secret (nullable) |
 | `api_key_masked` | varchar | First 4 + `****` + last 4 (for display) |
+| `refresh_token_encrypted` | text | AES-encrypted OAuth2 refresh token |
+| `access_token_encrypted` | text | AES-encrypted cached access token |
+| `token_expires_at` | timestamptz | Access token expiry |
+| `organization_id` | varchar(120) | OMS organization/tenant ID |
 | `status` | enum | `ACTIVE` or `DISABLED` |
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
@@ -1760,6 +1914,7 @@ Flyway manages 19 versioned migrations (V1–V19). All primary keys are `bigint 
 | `severity` | enum | `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` |
 | `transaction_id` | bigint FK | Linked transaction (nullable) |
 | `settlement_id` | bigint FK | Linked settlement (nullable) |
+| `bank_entry_id` | bigint FK | Linked bank statement entry (nullable) |
 | `expected_amount` | bigint | What was expected |
 | `actual_amount` | bigint | What was found |
 | `discrepancy_amount` | bigint | `actual - expected` |
@@ -1798,7 +1953,7 @@ Flyway manages 19 versioned migrations (V1–V19). All primary keys are `bigint 
 
 ---
 
-## 25. API Reference
+## 26. API Reference
 
 ### Webhook endpoints (public — no JWT required)
 
@@ -1826,7 +1981,9 @@ Both return `200 "received"` on success, `400 "Invalid signature"` on failure.
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | GET | `/api/v1/connections` | JWT | List connections (masked credentials) |
-| POST | `/api/v1/connections` | JWT | Save/update provider connection |
+| POST | `/api/v1/connections` | JWT | Save/update payment provider connection (Razorpay, Stripe) |
+| POST | `/api/v1/connections/oauth` | JWT | Save/update OAuth2 OMS connection (Zoho Inventory) |
+| POST | `/api/v1/connections/test` | JWT | Test an existing connection |
 
 ### Dashboard
 
@@ -1892,7 +2049,7 @@ Both return `200 "received"` on success, `400 "Invalid signature"` on failure.
 
 ---
 
-## 26. Configuration Reference
+## 27. Configuration Reference
 
 All configuration is in `src/main/resources/application.yml`. Secrets come from environment variables.
 
@@ -1927,9 +2084,6 @@ db-scheduler:
   table-name: scheduled_tasks
 
 app:
-  merchant:
-    id: ${MERCHANT_ID:merchant_001}
-
   razorpay:
     key-id: ${RAZORPAY_KEY_ID}
     key-secret: ${RAZORPAY_KEY_SECRET}
@@ -1947,7 +2101,6 @@ app:
     run-interval-minutes: 5
     missing-capture-threshold-hours: 24
     amount-tolerance-paisa: 100
-    settlement-overdue-days: 7
 
   order-matching:
     amount-tolerance-paisa: 100
@@ -1964,6 +2117,14 @@ app:
     gap-filler-lookback-minutes: 30
     settlement-reconciler-cron: "0 0 2 * * *"
 
+  oms:
+    polling-interval-minutes: ${OMS_POLLING_INTERVAL:15}
+    lookback-minutes: ${OMS_LOOKBACK_MINUTES:30}
+    payment-grace-minutes: ${OMS_PAYMENT_GRACE_MINUTES:1440}
+    zoho:
+      token-url: ${ZOHO_TOKEN_URL:https://accounts.zoho.com/oauth/v2/token}
+      api-base-url: ${ZOHO_API_BASE_URL:https://www.zohoapis.com}
+
   encryption:
     key: ${APP_ENCRYPTION_KEY}
 ```
@@ -1975,16 +2136,19 @@ app:
 | `DB_URL` | PostgreSQL JDBC URL |
 | `DB_USERNAME` | Database user |
 | `DB_PASSWORD` | Database password |
-| `RAZORPAY_KEY_ID` | Default Razorpay API key (for polling without per-merchant creds) |
-| `RAZORPAY_KEY_SECRET` | Default Razorpay API secret |
-| `RAZORPAY_WEBHOOK_SECRET` | Default webhook HMAC secret (fallback when no merchant match) |
+| `RAZORPAY_KEY_ID` | Razorpay API key (for polling) |
+| `RAZORPAY_KEY_SECRET` | Razorpay API secret |
+| `RAZORPAY_WEBHOOK_SECRET` | Razorpay webhook HMAC secret (used in test/dev only; production uses per-merchant secrets) |
 | `STRIPE_SECRET_KEY` | Stripe API key (for polling) |
-| `STRIPE_WEBHOOK_SECRET` | Webhook HMAC secret |
-| `JWT_SECRET` | JWT signing key (must be ≥32 chars for HS256) |
-| `APP_ENCRYPTION_KEY` | AES encryption key (for ProviderConnection credentials) |
-| `MERCHANT_ID` | Default merchant identifier |
+| `STRIPE_WEBHOOK_SECRET` | Stripe webhook HMAC secret |
+| `JWT_SECRET` | JWT signing key (must be 32+ chars for HS256) |
+| `APP_ENCRYPTION_KEY` | AES-256 encryption key for provider credentials (Base64-encoded, 32 bytes) |
 | `PORT` | Server port (default 8080) |
-| `SPRING_PROFILES_ACTIVE` | `local` or `prod` |
+| `OMS_POLLING_INTERVAL` | OMS polling frequency in minutes (default 15) |
+| `OMS_LOOKBACK_MINUTES` | OMS polling lookback window (default 30) |
+| `OMS_PAYMENT_GRACE_MINUTES` | Grace period before flagging OMS orders with no payment (default 1440 = 24h) |
+| `ZOHO_TOKEN_URL` | Zoho OAuth2 token endpoint (default: `https://accounts.zoho.com/oauth/v2/token`) |
+| `ZOHO_API_BASE_URL` | Zoho API base URL (default: `https://www.zohoapis.com`) |
 
 ### Docker
 
@@ -1994,6 +2158,7 @@ docker build -t reconciliation:latest .
 docker run -p 8080:8080 \
   -e DB_URL=jdbc:postgresql://host:5433/reconciliation_dev \
   -e JWT_SECRET=your-secret \
+  -e APP_ENCRYPTION_KEY=your-base64-key \
   reconciliation:latest
 ```
 
@@ -2005,7 +2170,7 @@ Starts PostgreSQL 16 on port 5433 and PgAdmin on port 5050.
 
 ---
 
-## 27. Testing Strategy
+## 28. Testing Strategy
 
 ### Test philosophy
 
@@ -2017,9 +2182,9 @@ All existing tests are unit tests using Mockito mocks. There is no in-memory dat
 |---|---|
 | `WebhookIngestionServiceTest` | Save new event + queue processing; ignore duplicate via unique violation; PaymentFlowEvent stages recorded |
 | `WebhookControllerTest` | Signature validation pass/fail; controller returns correct HTTP status |
-| `RazorpaySignatureServiceTest` | HMAC-SHA256 verification logic |
+| `RazorpaySignatureServiceTest` | Per-merchant HMAC-SHA256 verification; rejects when no merchant secret matches |
 | `StripeSignatureServiceTest` | Stripe signature verification |
-| `TransactionProcessingServiceTest` | User resolution; refund linking; order matching triggered on CAPTURED; error path sets processingError |
+| `TransactionProcessingServiceTest` | User resolution; refund linking; order matching triggered on CAPTURED; orphan refund relinking on new payment; error path sets processingError |
 | `NormalizationServiceTest` | Razorpay and Stripe payloads produce correct canonical Transaction fields |
 | `TransactionServiceTest` | Upsert insert path; upsert merge path (newer wins); upsert skip path (older loses); same-time non-advancing status ignored |
 | `OrderMatchingServiceTest` | Match on capture — exact, overpaid, underpaid; match on order creation; amount tolerance boundaries |
@@ -2028,8 +2193,8 @@ All existing tests are unit tests using Mockito mocks. There is no in-memory dat
 | `BankStatementIngestionServiceTest` | Standard CSV split columns; single amount+CR/DR column; Indian amount format; SBI-style metadata header with footer; TSV internal format; provider detection; malformed line handling; empty file; batch ID assignment |
 | `BankStatementMatchingServiceTest` | Pass 1 UTR match; Pass 2 amount+date match; Pass 3 narration parse; amount mismatch on UTR match creates exception; non-gateway credits stay PENDING |
 | `ReconciliationEngineTest` | One rule failing does not block subsequent rules |
-| `RuleBehaviorTest` | All 7 rules: candidate detection + exception creation + deduplication |
-| `ExceptionRecordServiceTest` | Deduplication: does not create a second exception for same (type, txnId); synthetic key dedup for order exceptions |
+| `RuleBehaviorTest` | All reconciliation rules: candidate detection + exception creation + deduplication |
+| `ExceptionRecordServiceTest` | Deduplication: does not create a second exception for same (type, txnId); synthetic key dedup for order exceptions; bank entry dedup |
 | `AdminServicePollTest` | Razorpay poll fetches payments+refunds; Stripe poll fetches charges+refunds; unknown provider throws; audit is called |
 | `AdminPollToIngestionIntegrationTest` | Full chain: AdminService → real WebhookIngestionService → repo + processingService. Verifies event saved with correct source and provider. Tests deduplication in the chain. |
 | `SettlementReconcilerJobTest` | Phase 1: MATCHED_TO_BANK when no exceptions; stays SETTLED when exceptions open. Phase 2: creates exception for overdue; skips already-flagged. Mixed batch; audit always called. |

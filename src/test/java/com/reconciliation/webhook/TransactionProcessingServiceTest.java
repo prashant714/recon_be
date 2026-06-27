@@ -5,6 +5,8 @@ import com.reconciliation.common.enums.EventType;
 import com.reconciliation.common.enums.ReconciliationStatus;
 import com.reconciliation.common.enums.TransactionStatus;
 import com.reconciliation.transaction.entity.Transaction;
+import com.reconciliation.exception_record.repository.ExceptionRecordRepository;
+import com.reconciliation.transaction.repository.TransactionRepository;
 import com.reconciliation.transaction.service.NormalizationService;
 import com.reconciliation.transaction.service.TransactionService;
 import com.reconciliation.transaction.service.TransactionUpsertResult;
@@ -43,17 +45,21 @@ class TransactionProcessingServiceTest {
     private final PaymentFlowEventService paymentFlowEventService = mock(PaymentFlowEventService.class);
     private final OrderMatchingService orderMatchingService = mock(OrderMatchingService.class);
     private final SettlementService settlementService = mock(SettlementService.class);
+    private final TransactionRepository transactionRepository = mock(TransactionRepository.class);
+    private final ExceptionRecordRepository exceptionRecordRepository = mock(ExceptionRecordRepository.class);
     private final TransactionTemplate transactionTemplate = mock(TransactionTemplate.class);
 
     private final TransactionProcessingService service = new TransactionProcessingService(
             webhookEventRepository,
             normalizationService,
             transactionService,
+            transactionRepository,
             userIdentityService,
             webhookEventStatusService,
             paymentFlowEventService,
             orderMatchingService,
             settlementService,
+            exceptionRecordRepository,
             objectMapper,
             transactionTemplate
     );

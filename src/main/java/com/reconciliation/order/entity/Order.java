@@ -68,6 +68,19 @@ public class Order {
     @Column(columnDefinition = "jsonb")
     private Map<String, Object> metadata;
 
+    @Column(name = "oms_provider", length = 30)
+    private String omsProvider;
+
+    @Column(name = "oms_order_status", length = 60)
+    private String omsOrderStatus;
+
+    @Column(name = "oms_synced_at")
+    private OffsetDateTime omsSyncedAt;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "oms_raw_payload", columnDefinition = "jsonb")
+    private Map<String, Object> omsRawPayload;
+
     @Column(name = "matched_at")
     private OffsetDateTime matchedAt;
 

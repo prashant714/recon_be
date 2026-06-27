@@ -16,7 +16,7 @@ import static org.mockito.Mockito.when;
 class RazorpaySignatureServiceTest {
 
     @Test
-    void verifiesValidSignature() throws Exception {
+    void verifiesValidSignatureFromMerchant() throws Exception {
         byte[] payload = "{\"event\":\"payment.captured\"}".getBytes(StandardCharsets.UTF_8);
         String secret = "test_secret";
         Mac mac = Mac.getInstance("HmacSHA256");
@@ -24,12 +24,31 @@ class RazorpaySignatureServiceTest {
         String signature = HexFormat.of().formatHex(mac.doFinal(payload));
 
         MerchantRepository repository = mock(MerchantRepository.class);
-        when(repository.findByStatus("ACTIVE")).thenReturn(List.of());
-        RazorpaySignatureService service =
-                new RazorpaySignatureService(repository, secret, "merchant_001");
+        when(repository.findByStatus("ACTIVE")).thenReturn(List.of(Merchant.builder()
+                .merchantId("merchant_001")
+                .webhookSecret(secret)
+                .status("ACTIVE")
+                .build()));
+        RazorpaySignatureService service = new RazorpaySignatureService(repository);
 
         assertThat(service.verify(payload, signature)).isTrue();
         assertThat(service.resolveMerchantId(payload, signature)).contains("merchant_001");
+    }
+
+    @Test
+    void rejectsWhenNoMerchantSecretMatches() throws Exception {
+        byte[] payload = "{\"event\":\"payment.captured\"}".getBytes(StandardCharsets.UTF_8);
+        String secret = "unknown_secret";
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+        String signature = HexFormat.of().formatHex(mac.doFinal(payload));
+
+        MerchantRepository repository = mock(MerchantRepository.class);
+        when(repository.findByStatus("ACTIVE")).thenReturn(List.of());
+        RazorpaySignatureService service = new RazorpaySignatureService(repository);
+
+        assertThat(service.verify(payload, signature)).isFalse();
+        assertThat(service.resolveMerchantId(payload, signature)).isEmpty();
     }
 
     @Test
@@ -46,8 +65,7 @@ class RazorpaySignatureServiceTest {
                 .webhookSecret(secret)
                 .status("ACTIVE")
                 .build()));
-        RazorpaySignatureService service =
-                new RazorpaySignatureService(repository, "default_secret", "merchant_001");
+        RazorpaySignatureService service = new RazorpaySignatureService(repository);
 
         assertThat(service.resolveMerchantId(payload, signature)).contains("merchant_live");
     }

@@ -1,6 +1,7 @@
 package com.reconciliation.connection.entity;
 
 import com.reconciliation.common.enums.ConnectionStatus;
+import com.reconciliation.common.enums.ProviderType;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -40,19 +41,36 @@ public class ProviderConnection {
     @Column(nullable = false, length = 30)
     private String provider;
 
-    @Column(name = "api_key_encrypted", nullable = false, columnDefinition = "TEXT")
+    @Column(name = "api_key_encrypted", columnDefinition = "TEXT")
     private String apiKeyEncrypted;
 
-    @Column(name = "secret_encrypted", nullable = false, columnDefinition = "TEXT")
+    @Column(name = "secret_encrypted", columnDefinition = "TEXT")
     private String secretEncrypted;
 
-    @Column(name = "api_key_masked", nullable = false, length = 80)
+    @Column(name = "api_key_masked", length = 80)
     private String apiKeyMasked;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
     @Builder.Default
     private ConnectionStatus status = ConnectionStatus.ACTIVE;
+
+    @Column(name = "refresh_token_encrypted", columnDefinition = "TEXT")
+    private String refreshTokenEncrypted;
+
+    @Column(name = "access_token_encrypted", columnDefinition = "TEXT")
+    private String accessTokenEncrypted;
+
+    @Column(name = "token_expires_at")
+    private OffsetDateTime tokenExpiresAt;
+
+    @Column(name = "organization_id", length = 120)
+    private String organizationId;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "provider_type", nullable = false, length = 20)
+    @Builder.Default
+    private ProviderType providerType = ProviderType.PAYMENT;
 
     @Column(name = "created_at", nullable = false)
     private OffsetDateTime createdAt;

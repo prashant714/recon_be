@@ -31,6 +31,9 @@ public class UnmatchedOrderRule implements ReconciliationRule {
     @Value("${app.order-matching.payment-grace-minutes:30}")
     private int paymentGraceMinutes;
 
+    @Value("${app.oms.payment-grace-minutes:1440}")
+    private int omsPaymentGraceMinutes;
+
     @Value("${app.order-matching.order-grace-minutes:15}")
     private int orderGraceMinutes;
 
@@ -43,25 +46,22 @@ public class UnmatchedOrderRule implements ReconciliationRule {
     @Transactional
     public void evaluate() {
         checkOrdersWithNoPayment();
+        checkOmsOrdersWithNoPayment();
         checkPaymentsWithNoOrder();
     }
 
-    /** Orders registered but no matching payment arrived within the grace window. */
+    /** Non-OMS orders registered but no matching payment arrived within the grace window. */
     private void checkOrdersWithNoPayment() {
         OffsetDateTime cutoff = OffsetDateTime.now().minusMinutes(paymentGraceMinutes);
         List<Order> stale = orderRepository.findStaleCreatedOrders(cutoff);
 
         for (Order order : stale) {
-            // Deduplication is handled inside createForOrderAlert via a synthetic key
-            // on (merchantId, orderId, exceptionType) — no pre-check needed here.
             String desc = String.format(
                     "Order %s (merchant=%s, expected=%d %s) has been waiting for payment for >%d minutes. "
                     + "No captured payment found.",
                     order.getOrderId(), order.getMerchantId(),
                     order.getExpectedAmount(), order.getCurrency(), paymentGraceMinutes);
 
-            // create as a settlement-less, transaction-less exception using the createForTransaction
-            // with a null transactionId — stored as an operational alert
             exceptionRecordService.createForOrderAlert(
                     ExceptionType.MISSING_PAYMENT,
                     Severity.HIGH,
@@ -73,6 +73,32 @@ public class UnmatchedOrderRule implements ReconciliationRule {
 
             log.warn("UnmatchedOrderRule: order {} has no payment after {} min",
                     order.getOrderId(), paymentGraceMinutes);
+        }
+    }
+
+    /** OMS-synced orders with a longer grace window (default 24h) before flagging. */
+    private void checkOmsOrdersWithNoPayment() {
+        OffsetDateTime cutoff = OffsetDateTime.now().minusMinutes(omsPaymentGraceMinutes);
+        List<Order> stale = orderRepository.findStaleOmsCreatedOrders(cutoff);
+
+        for (Order order : stale) {
+            String desc = String.format(
+                    "OMS order %s (merchant=%s, provider=%s, expected=%d %s) has been waiting for "
+                    + "payment for >%d minutes. No captured payment found.",
+                    order.getOrderId(), order.getMerchantId(), order.getOmsProvider(),
+                    order.getExpectedAmount(), order.getCurrency(), omsPaymentGraceMinutes);
+
+            exceptionRecordService.createForOrderAlert(
+                    ExceptionType.MISSING_PAYMENT,
+                    Severity.MEDIUM,
+                    order.getOrderId(),
+                    order.getExpectedAmount(),
+                    order.getCurrency(),
+                    desc,
+                    order.getMerchantId());
+
+            log.warn("UnmatchedOrderRule: OMS order {} has no payment after {} min",
+                    order.getOrderId(), omsPaymentGraceMinutes);
         }
     }
 

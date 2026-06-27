@@ -106,6 +106,7 @@ public class BankStatementCatchUpJob {
             exceptionRecordService.createForBankEntry(
                     ExceptionType.UNMATCHED_BANK_CREDIT,
                     Severity.MEDIUM,
+                    entry.getId(),
                     entry.getAmount(),
                     entry.getCurrency(),
                     desc,

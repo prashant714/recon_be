@@ -33,11 +33,29 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
 
     Page<Order> findByMerchantIdAndOrderStatus(String merchantId, OrderStatus status, Pageable pageable);
 
-    /** Orders still CREATED after the grace window — payment never arrived. */
+    /** Non-OMS orders still CREATED after the grace window — payment never arrived. */
     @Query("""
         SELECT o FROM Order o
         WHERE o.orderStatus = com.reconciliation.common.enums.OrderStatus.CREATED
+          AND o.omsProvider IS NULL
           AND o.createdAt < :cutoff
         """)
     List<Order> findStaleCreatedOrders(@Param("cutoff") OffsetDateTime cutoff);
+
+    /** OMS-synced orders still CREATED after the (longer) grace window. */
+    @Query("""
+        SELECT o FROM Order o
+        WHERE o.orderStatus = com.reconciliation.common.enums.OrderStatus.CREATED
+          AND o.omsProvider IS NOT NULL
+          AND o.createdAt < :cutoff
+        """)
+    List<Order> findStaleOmsCreatedOrders(@Param("cutoff") OffsetDateTime cutoff);
+
+    @Query("""
+        SELECT o FROM Order o
+        WHERE o.omsProvider IS NOT NULL
+          AND o.orderStatus = com.reconciliation.common.enums.OrderStatus.CANCELLED
+          AND o.transactionId IS NOT NULL
+        """)
+    List<Order> findCancelledOmsOrdersWithPayment();
 }

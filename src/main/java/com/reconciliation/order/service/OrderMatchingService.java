@@ -36,9 +36,18 @@ public class OrderMatchingService {
     @Transactional
     public void tryMatchByTransaction(Transaction txn) {
         if (!isCapturedPayment(txn)) return;
-        if (txn.getOrderId() == null && txn.getProviderOrderId() == null) return;
 
-        Optional<Order> orderOpt = resolveOrder(txn.getMerchantId(), txn.getOrderId(), txn.getProviderOrderId());
+        Optional<Order> orderOpt = Optional.empty();
+        if (txn.getOrderId() != null || txn.getProviderOrderId() != null) {
+            orderOpt = resolveOrder(txn.getMerchantId(), txn.getOrderId(), txn.getProviderOrderId());
+        }
+
+        // OMS-created orders store the Razorpay payment_id as providerOrderId — match by providerTransactionId
+        if (orderOpt.isEmpty() && txn.getProviderTransactionId() != null) {
+            orderOpt = orderRepository.findByMerchantIdAndProviderOrderId(
+                    txn.getMerchantId(), txn.getProviderTransactionId());
+        }
+
         orderOpt.ifPresent(order -> match(order, txn));
     }
 
@@ -123,6 +132,12 @@ public class OrderMatchingService {
 
     private Optional<Transaction> resolveTransaction(Order order) {
         if (order.getProviderOrderId() != null) {
+            // OMS-driven path: providerOrderId holds the Razorpay payment_id (pay_xxx) — match on providerTransactionId
+            Optional<Transaction> byPaymentId = transactionRepository.findPaymentByProviderTransactionId(
+                    "razorpay", order.getMerchantId(), order.getProviderOrderId());
+            if (byPaymentId.isPresent()) return byPaymentId;
+
+            // Manual-registration path: providerOrderId holds a Razorpay/Stripe order_id — match on providerOrderId
             Optional<Transaction> byProviderOrder = transactionRepository
                     .findByProviderAndMerchantIdAndProviderOrderId(
                             "razorpay", order.getMerchantId(), order.getProviderOrderId())

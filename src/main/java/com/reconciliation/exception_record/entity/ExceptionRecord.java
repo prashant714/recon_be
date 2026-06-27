@@ -51,6 +51,9 @@ public class ExceptionRecord {
     @Column(name = "settlement_id")
     private Long settlementId;
 
+    @Column(name = "bank_entry_id")
+    private Long bankEntryId;
+
     @Column(name = "expected_amount")
     private Long expectedAmount;
 

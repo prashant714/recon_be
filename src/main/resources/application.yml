@@ -107,3 +107,14 @@ app:
     amount-tolerance-paisa: 500
     unmatched-entry-grace-hours: 48
     overdue-settlement-days: 7
+  oms:
+    polling-interval-minutes: ${OMS_POLLING_INTERVAL:15}
+    lookback-minutes: ${OMS_LOOKBACK_MINUTES:30}
+    payment-grace-minutes: ${OMS_PAYMENT_GRACE_MINUTES:1440}
+    zoho:
+      token-url: ${ZOHO_TOKEN_URL:https://accounts.zoho.com/oauth/v2/token}
+      api-base-url: ${ZOHO_API_BASE_URL:https://www.zohoapis.com}
+      # Zoho Inventory scope: ZohoInventory.salesorders.READ
+      # Zoho Books scope:     ZohoBooks.customerpayments.READ
+    shopify:
+      api-version: ${SHOPIFY_API_VERSION:2024-01}

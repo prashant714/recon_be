@@ -119,6 +119,11 @@ public interface ExceptionRecordRepository extends JpaRepository<ExceptionRecord
             Long settlementId,
             Collection<ExceptionStatus> statuses);
 
+    boolean existsByExceptionTypeAndBankEntryIdAndStatusIn(
+            ExceptionType exceptionType,
+            Long bankEntryId,
+            Collection<ExceptionStatus> statuses);
+
     boolean existsByExceptionTypeAndMerchantIdAndDescriptionContainingAndStatusIn(
             ExceptionType exceptionType,
             String merchantId,

@@ -14,4 +14,8 @@ public interface ProviderConnectionRepository extends JpaRepository<ProviderConn
     Optional<ProviderConnection> findByMerchantIdAndProvider(String merchantId, String provider);
 
     List<ProviderConnection> findByProviderAndStatus(String provider, com.reconciliation.common.enums.ConnectionStatus status);
+
+    List<ProviderConnection> findByProviderTypeAndStatus(
+            com.reconciliation.common.enums.ProviderType providerType,
+            com.reconciliation.common.enums.ConnectionStatus status);
 }

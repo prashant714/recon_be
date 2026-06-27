@@ -121,11 +121,17 @@ public class ExceptionRecordService {
 
     /**
      * Create an exception for an unmatched bank statement entry (no linked transaction or settlement).
+     * Deduplicates by (bankEntryId, exceptionType) against OPEN/IN_REVIEW records.
      */
     @Transactional
     public ExceptionRecord createForBankEntry(
-            ExceptionType type, Severity severity, Long amount,
+            ExceptionType type, Severity severity, Long bankEntryId, Long amount,
             String currency, String description, String merchantId) {
+
+        if (bankEntryId != null && alreadyExistsForBankEntry(type, bankEntryId)) {
+            log.debug("Exception {} already exists for bankEntry {}", type, bankEntryId);
+            return null;
+        }
 
         ExceptionRecord record = ExceptionRecord.builder()
                 .merchantId(merchantId)
@@ -133,6 +139,7 @@ public class ExceptionRecordService {
                 .severity(severity)
                 .transactionId(null)
                 .settlementId(null)
+                .bankEntryId(bankEntryId)
                 .expectedAmount(null)
                 .actualAmount(amount)
                 .discrepancyAmount(null)
@@ -143,6 +150,13 @@ public class ExceptionRecordService {
                 .build();
 
         return exceptionRecordRepository.save(record);
+    }
+
+    @Transactional(readOnly = true)
+    public boolean alreadyExistsForBankEntry(ExceptionType exceptionType, Long bankEntryId) {
+        if (bankEntryId == null) return false;
+        return exceptionRecordRepository.existsByExceptionTypeAndBankEntryIdAndStatusIn(
+                exceptionType, bankEntryId, ACTIVE_STATUSES);
     }
 
     /**

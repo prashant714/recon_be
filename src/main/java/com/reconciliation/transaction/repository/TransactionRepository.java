@@ -135,9 +135,19 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long> 
         SELECT t FROM Transaction t
         WHERE t.eventType = com.reconciliation.common.enums.EventType.REFUND
           AND t.parentTransactionId IS NULL
+          AND t.merchantId = :merchantId
           AND t.eventOccurredAt < :cutoff
     """)
-    List<Transaction> findOrphanRefunds(@Param("cutoff") OffsetDateTime cutoff);
+    List<Transaction> findOrphanRefunds(
+            @Param("merchantId") String merchantId,
+            @Param("cutoff") OffsetDateTime cutoff);
+
+    @Query("""
+        SELECT DISTINCT t.merchantId FROM Transaction t
+        WHERE t.eventType = com.reconciliation.common.enums.EventType.REFUND
+          AND t.parentTransactionId IS NULL
+    """)
+    List<String> findMerchantIdsWithOrphanRefunds();
 
     @Query("""
         SELECT COALESCE(SUM(t.netAmount), 0)

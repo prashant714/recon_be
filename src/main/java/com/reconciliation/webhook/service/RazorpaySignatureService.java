@@ -8,23 +8,17 @@ import java.util.HexFormat;
 import java.util.Optional;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
-import org.springframework.beans.factory.annotation.Value;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 @Service
+@Slf4j
 public class RazorpaySignatureService {
 
     private final MerchantRepository merchantRepository;
-    private final String defaultWebhookSecret;
-    private final String defaultMerchantId;
 
-    public RazorpaySignatureService(
-            MerchantRepository merchantRepository,
-            @Value("${app.razorpay.webhook-secret}") String webhookSecret,
-            @Value("${app.merchant.id:merchant_001}") String defaultMerchantId) {
+    public RazorpaySignatureService(MerchantRepository merchantRepository) {
         this.merchantRepository = merchantRepository;
-        this.defaultWebhookSecret = webhookSecret;
-        this.defaultMerchantId = defaultMerchantId;
     }
 
     public boolean verify(byte[] rawBody, String signature) {
@@ -43,12 +37,7 @@ public class RazorpaySignatureService {
             }
         }
 
-        if (defaultWebhookSecret != null
-                && !defaultWebhookSecret.isBlank()
-                && verifyWithSecret(rawBody, signature, defaultWebhookSecret)) {
-            return Optional.of(defaultMerchantId);
-        }
-
+        log.warn("Webhook signature did not match any active merchant — rejecting");
         return Optional.empty();
     }
 

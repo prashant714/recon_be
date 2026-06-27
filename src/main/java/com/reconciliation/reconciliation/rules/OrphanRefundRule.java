@@ -31,32 +31,33 @@ public class OrphanRefundRule implements ReconciliationRule {
     @Override
     @Transactional
     public void evaluate() {
-        // Find refunds that have no parentTransactionId after a certain time
-        List<Transaction> orphans = transactionRepository.findOrphanRefunds(
-                java.time.OffsetDateTime.now().minusMinutes(10)
-        );
+        java.time.OffsetDateTime cutoff = java.time.OffsetDateTime.now().minusMinutes(10);
 
-        for (Transaction refund : orphans) {
-            String desc = String.format(
-                "Refund %s could not be linked to any parent payment transaction.",
-                refund.getProviderTransactionId()
-            );
+        for (String merchantId : transactionRepository.findMerchantIdsWithOrphanRefunds()) {
+            List<Transaction> orphans = transactionRepository.findOrphanRefunds(merchantId, cutoff);
 
-            ExceptionRecord record = exceptionRecordService.createForTransaction(
-                    ExceptionType.ORPHAN_REFUND,
-                    Severity.HIGH,
-                    refund.getId(),
-                    refund.getPresentmentAmount(),
-                    null,
-                    refund.getPresentmentCurrency(),
-                    desc,
-                    refund.getMerchantId()
-            );
+            for (Transaction refund : orphans) {
+                String desc = String.format(
+                    "Refund %s could not be linked to any parent payment transaction.",
+                    refund.getProviderTransactionId()
+                );
 
-            if (record != null) {
-                refund.setExceptionId(record.getId());
-                refund.setReconciliationStatus(ReconciliationStatus.EXCEPTION);
-                transactionRepository.save(refund);
+                ExceptionRecord record = exceptionRecordService.createForTransaction(
+                        ExceptionType.ORPHAN_REFUND,
+                        Severity.HIGH,
+                        refund.getId(),
+                        refund.getPresentmentAmount(),
+                        null,
+                        refund.getPresentmentCurrency(),
+                        desc,
+                        refund.getMerchantId()
+                );
+
+                if (record != null) {
+                    refund.setExceptionId(record.getId());
+                    refund.setReconciliationStatus(ReconciliationStatus.EXCEPTION);
+                    transactionRepository.save(refund);
+                }
             }
         }
     }

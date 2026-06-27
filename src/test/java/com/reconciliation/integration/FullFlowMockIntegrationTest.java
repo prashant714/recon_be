@@ -9,6 +9,7 @@ import com.reconciliation.common.enums.ReconciliationStatus;
 import com.reconciliation.common.enums.Severity;
 import com.reconciliation.common.enums.TransactionStatus;
 import com.reconciliation.exception_record.entity.ExceptionRecord;
+import com.reconciliation.exception_record.repository.ExceptionRecordRepository;
 import com.reconciliation.exception_record.service.ExceptionRecordService;
 import com.reconciliation.order.entity.Order;
 import com.reconciliation.order.repository.OrderRepository;
@@ -92,6 +93,7 @@ class FullFlowMockIntegrationTest {
     private final TransactionTemplate transactionTemplate = mock(TransactionTemplate.class);
     private final OrderRepository orderRepository = mock(OrderRepository.class);
     private final ExceptionRecordService exceptionRecordService = mock(ExceptionRecordService.class);
+    private final ExceptionRecordRepository exceptionRecordRepository = mock(ExceptionRecordRepository.class);
 
     private TransactionProcessingService processingService;
 
@@ -104,11 +106,13 @@ class FullFlowMockIntegrationTest {
                 webhookEventRepository,
                 normalizationService,
                 transactionService,
+                transactionRepository,
                 userIdentityService,
                 webhookEventStatusService,
                 paymentFlowEventService,
                 orderMatchingService,
                 settlementService,
+                exceptionRecordRepository,
                 objectMapper,
                 transactionTemplate
         );
