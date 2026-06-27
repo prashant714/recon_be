@@ -29,19 +29,19 @@ public class ShopifyWebhookService {
     private final ShopifyOmsConnector shopifyConnector;
     private final OmsOrderIngestionService ingestionService;
     private final ObjectMapper objectMapper;
-    private final String clientSecret;
+    private final String webhookSecret;
 
     public ShopifyWebhookService(
             ProviderConnectionRepository connectionRepository,
             ShopifyOmsConnector shopifyConnector,
             OmsOrderIngestionService ingestionService,
             ObjectMapper objectMapper,
-            @Value("${app.oms.shopify.client-secret}") String clientSecret) {
+            @Value("${app.oms.shopify.webhook-secret}") String webhookSecret) {
         this.connectionRepository = connectionRepository;
         this.shopifyConnector = shopifyConnector;
         this.ingestionService = ingestionService;
         this.objectMapper = objectMapper;
-        this.clientSecret = clientSecret;
+        this.webhookSecret = webhookSecret;
     }
 
     /**
@@ -90,12 +90,12 @@ public class ShopifyWebhookService {
         return true;
     }
 
-    // Shopify signs webhooks with HMAC-SHA256 using the app's client secret, Base64-encoded
+    // Shopify signs webhooks with HMAC-SHA256 using the webhook signing secret, Base64-encoded
     private boolean verifyHmac(byte[] rawBody, String hmacHeader, ProviderConnection connection) {
         if (hmacHeader == null || hmacHeader.isBlank()) return false;
         try {
             Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(clientSecret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            mac.init(new SecretKeySpec(webhookSecret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
             String computed = Base64.getEncoder().encodeToString(mac.doFinal(rawBody));
             return MessageDigest.isEqual(
                     computed.getBytes(StandardCharsets.UTF_8),
