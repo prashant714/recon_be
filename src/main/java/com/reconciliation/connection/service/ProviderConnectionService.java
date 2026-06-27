@@ -120,7 +120,8 @@ public class ProviderConnectionService {
      */
     @Transactional
     public Map<String, Object> upsertOmsToken(String merchantId, String provider,
-                                               String shopDomain, String accessToken) {
+                                               String shopDomain, String accessToken,
+                                               String webhookSecret) {
         String normalized = normalizeOmsProvider(provider);
         if (shopDomain == null || shopDomain.isBlank()) throw new IllegalArgumentException("shopDomain is required");
         if (accessToken == null || accessToken.isBlank()) throw new IllegalArgumentException("accessToken is required");
@@ -147,6 +148,10 @@ public class ProviderConnectionService {
         connection.setSecretEncrypted(encryptionService.encrypt(accessToken.trim()));
         connection.setApiKeyMasked(mask(shopDomain.trim()));
         connection.setOrganizationId(shopDomain.trim());
+        // webhookSecret stored in refreshTokenEncrypted — used by ShopifyWebhookService for HMAC verification
+        if (webhookSecret != null && !webhookSecret.isBlank()) {
+            connection.setRefreshTokenEncrypted(encryptionService.encrypt(webhookSecret.trim()));
+        }
         connection.setStatus(ConnectionStatus.ACTIVE);
         connection.setProviderType(ProviderType.OMS);
 

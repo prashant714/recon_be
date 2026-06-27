@@ -53,6 +53,11 @@ public class ShopifyOmsConnector implements OmsConnector {
         apiClient.testConnection(connection);
     }
 
+    /** Called by ShopifyWebhookService to map a single order from a webhook payload. */
+    public OmsOrder mapWebhookOrder(ProviderConnection connection, JsonNode node) {
+        return mapToOmsOrder(connection, node);
+    }
+
     private OmsOrder mapToOmsOrder(ProviderConnection connection, JsonNode node) {
         String financialStatus = node.path("financial_status").asText();
         if (!"paid".equalsIgnoreCase(financialStatus) && !"partially_paid".equalsIgnoreCase(financialStatus)) {

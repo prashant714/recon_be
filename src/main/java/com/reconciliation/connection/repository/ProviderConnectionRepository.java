@@ -18,4 +18,9 @@ public interface ProviderConnectionRepository extends JpaRepository<ProviderConn
     List<ProviderConnection> findByProviderTypeAndStatus(
             com.reconciliation.common.enums.ProviderType providerType,
             com.reconciliation.common.enums.ConnectionStatus status);
+
+    Optional<ProviderConnection> findByProviderAndOrganizationIdAndStatus(
+            String provider,
+            String organizationId,
+            com.reconciliation.common.enums.ConnectionStatus status);
 }

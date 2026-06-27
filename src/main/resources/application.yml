@@ -118,3 +118,7 @@ app:
       # Zoho Books scope:     ZohoBooks.customerpayments.READ
     shopify:
       api-version: ${SHOPIFY_API_VERSION:2024-01}
+      client-id: ${SHOPIFY_CLIENT_ID:}
+      client-secret: ${SHOPIFY_CLIENT_SECRET:}
+      redirect-uri: ${SHOPIFY_REDIRECT_URI:https://recon-be.onrender.com/api/v1/connections/shopify/oauth/callback}
+      scopes: read_orders,read_transactions

@@ -73,7 +73,7 @@ public class ProviderConnectionController {
         String merchantId = merchantId(request);
         if (merchantId == null) return unauthorized();
         return ResponseEntity.ok(connectionService.upsertOmsToken(
-                merchantId, req.provider(), req.shopDomain(), req.accessToken()));
+                merchantId, req.provider(), req.shopDomain(), req.accessToken(), req.webhookSecret()));
     }
 
     private String merchantId(HttpServletRequest request) {
@@ -89,6 +89,6 @@ public class ProviderConnectionController {
     public record OAuthConnectionRequest(String provider, String clientId, String clientSecret,
                                          String refreshToken, String organizationId) {}
 
-    /** shopDomain: e.g. mystore.myshopify.com — accessToken: Shopify Admin API token */
-    public record OmsTokenConnectionRequest(String provider, String shopDomain, String accessToken) {}
+    /** shopDomain: e.g. mystore.myshopify.com — accessToken: Shopify Admin API token — webhookSecret: Client Secret for HMAC verification */
+    public record OmsTokenConnectionRequest(String provider, String shopDomain, String accessToken, String webhookSecret) {}
 }
