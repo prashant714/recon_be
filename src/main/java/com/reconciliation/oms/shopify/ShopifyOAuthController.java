@@ -62,8 +62,13 @@ public class ShopifyOAuthController {
             log.warn("Shopify OAuth callback HMAC failed for shop={}", shop);
             return ResponseEntity.status(401).body(Map.of("error", "Invalid signature"));
         } catch (Exception e) {
-            log.error("Shopify OAuth callback error for shop={}: {}", shop, e.getMessage());
-            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+            // State not found — return the code so merchant can call /exchange with JWT
+            log.warn("Shopify OAuth callback state error for shop={}: {} — returning code for manual exchange", shop, e.getMessage());
+            return ResponseEntity.ok(Map.of(
+                    "status", "code_received",
+                    "shop", shop,
+                    "code", code != null ? code : "",
+                    "next_step", "Call GET /api/v1/connections/shopify/oauth/exchange?shop=" + shop + "&code=" + code + " with your JWT to complete connection"));
         }
     }
 
