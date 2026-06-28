@@ -110,20 +110,27 @@ public class ShopifyOmsConnector implements OmsConnector {
      */
     public String fetchRazorpayPaymentId(ProviderConnection connection, long shopifyOrderId) {
         List<JsonNode> transactions = apiClient.fetchTransactions(connection, shopifyOrderId);
+        log.info("fetchRazorpayPaymentId: shopifyOrderId={} txnCount={}", shopifyOrderId, transactions.size());
         for (JsonNode txn : transactions) {
-            if (!"success".equalsIgnoreCase(txn.path("status").asText())) continue;
-            String kind = txn.path("kind").asText("");
+            String kind   = txn.path("kind").asText("");
+            String status = txn.path("status").asText("");
+            String auth   = txn.path("authorization").asText(null);
+            JsonNode receipt = txn.path("receipt");
+            log.info("fetchRazorpayPaymentId: txn kind={} status={} authorization={} receipt={}",
+                    kind, status, auth, receipt);
+
+            if (!"success".equalsIgnoreCase(status)) continue;
             if (!"capture".equalsIgnoreCase(kind) && !"sale".equalsIgnoreCase(kind)) continue;
 
-            String fromReceipt = txn.path("receipt").path("razorpay_payment_id").asText(null);
+            String fromReceipt = receipt.path("razorpay_payment_id").asText(null);
             if (fromReceipt != null && fromReceipt.startsWith("pay_")) return fromReceipt;
 
-            String authorization = txn.path("authorization").asText(null);
-            if (authorization != null) {
-                String payId = extractPaymentIdFromAuthorization(authorization);
+            if (auth != null) {
+                String payId = extractPaymentIdFromAuthorization(auth);
                 if (payId != null) return payId;
             }
         }
+        log.warn("fetchRazorpayPaymentId: no pay_ ID found in {} transactions for shopifyOrderId={}", transactions.size(), shopifyOrderId);
         return null;
     }
 
