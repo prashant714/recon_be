@@ -84,6 +84,10 @@ public class ShopifyOmsConnector implements OmsConnector {
         String providerOrderId = extractRazorpayPaymentId(connection, node);
         if (providerOrderId != null) {
             metadata.put("razorpay_payment_id", providerOrderId);
+            log.info("Shopify order={} linked to Razorpay payment={}", orderName, providerOrderId);
+        } else {
+            log.debug("Shopify order={} has no Razorpay payment ID (gateway={})",
+                    orderName, node.path("payment_gateway").asText("unknown"));
         }
 
         return new OmsOrder(

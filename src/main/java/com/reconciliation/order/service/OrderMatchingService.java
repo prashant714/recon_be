@@ -48,7 +48,12 @@ public class OrderMatchingService {
                     txn.getMerchantId(), txn.getProviderTransactionId());
         }
 
-        orderOpt.ifPresent(order -> match(order, txn));
+        if (orderOpt.isPresent()) {
+            match(orderOpt.get(), txn);
+        } else {
+            log.info("tryMatchByTransaction: no order found for txn={} orderId={} providerOrderId={} providerTxnId={}",
+                    txn.getId(), txn.getOrderId(), txn.getProviderOrderId(), txn.getProviderTransactionId());
+        }
     }
 
     /**
@@ -58,7 +63,12 @@ public class OrderMatchingService {
     @Transactional
     public void tryMatchByOrder(Order order) {
         Optional<Transaction> txnOpt = resolveTransaction(order);
-        txnOpt.ifPresent(txn -> match(order, txn));
+        if (txnOpt.isPresent()) {
+            match(order, txnOpt.get());
+        } else {
+            log.info("tryMatchByOrder: no transaction found for order={} providerOrderId={}",
+                    order.getOrderId(), order.getProviderOrderId());
+        }
     }
 
     private void match(Order order, Transaction txn) {

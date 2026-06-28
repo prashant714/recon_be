@@ -1,29 +1,20 @@
 package com.reconciliation.oms.service;
 
-import com.reconciliation.common.enums.OrderStatus;
 import com.reconciliation.oms.connector.OmsOrder;
-import com.reconciliation.order.entity.Order;
-import com.reconciliation.order.repository.OrderRepository;
-import com.reconciliation.order.service.OrderMatchingService;
-import java.time.OffsetDateTime;
 import java.util.List;
-import java.util.Optional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class OmsOrderIngestionService {
 
-    private final OrderRepository orderRepository;
-    private final OrderMatchingService orderMatchingService;
+    private final OmsOrderPersistenceService persistenceService;
 
-    @Transactional
-    public OmsIngestionResult ingest(String merchantId, String omsProvider,
-                                      List<OmsOrder> omsOrders) {
+    public OmsIngestionResult ingest(String merchantId, String omsProvider, List<OmsOrder> omsOrders) {
         int created = 0, updated = 0, skipped = 0;
 
         for (OmsOrder oms : omsOrders) {
@@ -32,41 +23,20 @@ public class OmsOrderIngestionService {
                 continue;
             }
 
-            Optional<Order> existing = orderRepository
-                    .findByMerchantIdAndOrderId(merchantId, oms.orderId());
-
-            if (existing.isEmpty() && oms.providerOrderId() != null) {
-                existing = orderRepository
-                        .findByMerchantIdAndProviderOrderId(merchantId, oms.providerOrderId());
-            }
-
-            if (existing.isPresent()) {
-                Order order = existing.get();
-                if (order.getOmsProvider() != null) {
-                    updateFromOms(order, oms);
-                    orderRepository.save(order);
+            try {
+                boolean wasCreated = persistenceService.upsert(merchantId, omsProvider, oms);
+                if (wasCreated) created++; else updated++;
+            } catch (DataIntegrityViolationException e) {
+                // Polling and webhook both tried to INSERT the same new order concurrently.
+                // The other path won — update the record it just created.
+                log.debug("OMS concurrent insert race for order={} — retrying as update", oms.orderId());
+                try {
+                    persistenceService.forceUpdate(merchantId, oms);
                     updated++;
-                } else {
+                } catch (Exception e2) {
+                    log.warn("OMS order skipped after concurrent conflict: orderId={}", oms.orderId());
                     skipped++;
                 }
-            } else {
-                Order order = Order.builder()
-                        .merchantId(merchantId)
-                        .orderId(oms.orderId())
-                        .providerOrderId(oms.providerOrderId())
-                        .expectedAmount(oms.expectedAmount())
-                        .currency(oms.currency().toUpperCase())
-                        .orderStatus(mapOmsStatus(oms.omsStatus()))
-                        .omsProvider(omsProvider)
-                        .omsOrderStatus(oms.omsStatus())
-                        .omsSyncedAt(OffsetDateTime.now())
-                        .omsRawPayload(oms.rawPayload())
-                        .metadata(oms.metadata())
-                        .build();
-
-                order = orderRepository.save(order);
-                orderMatchingService.tryMatchByOrder(order);
-                created++;
             }
         }
 
@@ -77,24 +47,5 @@ public class OmsOrderIngestionService {
 
     private boolean shouldSkip(String omsStatus) {
         return "draft".equalsIgnoreCase(omsStatus) || "void".equalsIgnoreCase(omsStatus);
-    }
-
-    private OrderStatus mapOmsStatus(String omsStatus) {
-        return switch (omsStatus.toLowerCase()) {
-            case "cancelled" -> OrderStatus.CANCELLED;
-            default -> OrderStatus.CREATED;
-        };
-    }
-
-    private void updateFromOms(Order order, OmsOrder oms) {
-        order.setOmsOrderStatus(oms.omsStatus());
-        order.setOmsSyncedAt(OffsetDateTime.now());
-        order.setOmsRawPayload(oms.rawPayload());
-        if (order.getOrderStatus() == OrderStatus.CREATED) {
-            order.setExpectedAmount(oms.expectedAmount());
-        }
-        if ("cancelled".equalsIgnoreCase(oms.omsStatus()) || "void".equalsIgnoreCase(oms.omsStatus())) {
-            order.setOrderStatus(OrderStatus.CANCELLED);
-        }
     }
 }
