@@ -104,6 +104,29 @@ public class ShopifyOmsConnector implements OmsConnector {
         );
     }
 
+    /**
+     * Called by ShopifyWebhookService when order_transactions/create has no authorization field.
+     * Makes a Shopify API call to fetch the transaction receipt and extract pay_xxx.
+     */
+    public String fetchRazorpayPaymentId(ProviderConnection connection, long shopifyOrderId) {
+        List<JsonNode> transactions = apiClient.fetchTransactions(connection, shopifyOrderId);
+        for (JsonNode txn : transactions) {
+            if (!"success".equalsIgnoreCase(txn.path("status").asText())) continue;
+            String kind = txn.path("kind").asText("");
+            if (!"capture".equalsIgnoreCase(kind) && !"sale".equalsIgnoreCase(kind)) continue;
+
+            String fromReceipt = txn.path("receipt").path("razorpay_payment_id").asText(null);
+            if (fromReceipt != null && fromReceipt.startsWith("pay_")) return fromReceipt;
+
+            String authorization = txn.path("authorization").asText(null);
+            if (authorization != null) {
+                String payId = extractPaymentIdFromAuthorization(authorization);
+                if (payId != null) return payId;
+            }
+        }
+        return null;
+    }
+
     private String extractRazorpayPaymentId(ProviderConnection connection, JsonNode orderNode) {
         // payment_gateway_names (array) is the current field; payment_gateway is the legacy single-value field
         boolean isRazorpay = false;

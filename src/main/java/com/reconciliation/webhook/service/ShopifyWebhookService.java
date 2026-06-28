@@ -69,7 +69,7 @@ public class ShopifyWebhookService {
         }
 
         if ("order_transactions/create".equals(topic)) {
-            return handleTransaction(rawBody, connection.getMerchantId(), shopDomain);
+            return handleTransaction(rawBody, connection, shopDomain);
         }
 
         if (!isOrderTopic(topic)) {
@@ -98,16 +98,17 @@ public class ShopifyWebhookService {
         return true;
     }
 
-    private boolean handleTransaction(byte[] rawBody, String merchantId, String shopDomain) {
+    private boolean handleTransaction(byte[] rawBody, ProviderConnection connection, String shopDomain) {
         try {
             JsonNode txn = objectMapper.readTree(rawBody);
-            String kind   = txn.path("kind").asText("");
-            String status = txn.path("status").asText("");
+            String kind          = txn.path("kind").asText("");
+            String status        = txn.path("status").asText("");
             String shopifyOrderId = txn.path("order_id").asText(null);
             String authorization  = txn.path("authorization").asText(null);
+            String gateway        = txn.path("gateway").asText(null);
 
-            log.info("order_transactions/create: received kind={} status={} shopifyOrderId={} authorization={} shop={}",
-                    kind, status, shopifyOrderId, authorization, shopDomain);
+            log.info("order_transactions/create: received kind={} status={} shopifyOrderId={} authorization={} gateway={} shop={}",
+                    kind, status, shopifyOrderId, authorization, gateway, shopDomain);
 
             if (!"capture".equalsIgnoreCase(kind) && !"sale".equalsIgnoreCase(kind)) {
                 log.info("order_transactions/create: skipping kind={} (not capture/sale)", kind);
@@ -117,17 +118,22 @@ public class ShopifyWebhookService {
                 log.info("order_transactions/create: skipping status={} (not success)", status);
                 return true;
             }
+            if (shopifyOrderId == null) return true;
 
-            if (shopifyOrderId == null || authorization == null) return true;
+            String paymentId = authorization != null ? extractPaymentId(authorization) : null;
 
-            String paymentId = extractPaymentId(authorization);
+            if (paymentId == null && gateway != null && gateway.toLowerCase().contains("razorpay")) {
+                log.info("order_transactions/create: authorization null/unparseable — fetching pay_id from Shopify API for shopifyOrderId={}", shopifyOrderId);
+                paymentId = shopifyConnector.fetchRazorpayPaymentId(connection, Long.parseLong(shopifyOrderId));
+            }
+
             if (paymentId == null) {
-                log.info("order_transactions/create: no pay_ ID in authorization={} shop={}", authorization, shopDomain);
+                log.info("order_transactions/create: no pay_ ID found (authorization={} gateway={}) shop={}", authorization, gateway, shopDomain);
                 return true;
             }
 
             log.info("order_transactions/create: shopifyOrderId={} paymentId={} shop={}", shopifyOrderId, paymentId, shopDomain);
-            orderMatchingService.linkTransactionToOmsOrder(merchantId, shopifyOrderId, paymentId);
+            orderMatchingService.linkTransactionToOmsOrder(connection.getMerchantId(), shopifyOrderId, paymentId);
         } catch (Exception e) {
             log.error("Shopify order_transactions/create processing failed shop={}: {}", shopDomain, e.getMessage(), e);
             return false;
