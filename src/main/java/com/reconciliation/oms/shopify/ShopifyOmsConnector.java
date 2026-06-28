@@ -107,14 +107,17 @@ public class ShopifyOmsConnector implements OmsConnector {
     /**
      * Called by ShopifyWebhookService when order_transactions/create has no authorization field.
      * Makes a Shopify API call to fetch the transaction receipt and extract pay_xxx.
+     * For "Cards Onsite by 1Razorpay", where no pay_xxx exists, returns receipt.payment_id
+     * (a Shopify PaymentSession token) as a fallback — the caller checks with startsWith("pay_").
      */
     public String fetchRazorpayPaymentId(ProviderConnection connection, long shopifyOrderId) {
         List<JsonNode> transactions = apiClient.fetchTransactions(connection, shopifyOrderId);
         log.info("fetchRazorpayPaymentId: shopifyOrderId={} txnCount={}", shopifyOrderId, transactions.size());
+        String paymentSessionToken = null;
         for (JsonNode txn : transactions) {
-            String kind   = txn.path("kind").asText("");
-            String status = txn.path("status").asText("");
-            String auth   = txn.path("authorization").asText(null);
+            String kind      = txn.path("kind").asText("");
+            String status    = txn.path("status").asText("");
+            String auth      = txn.path("authorization").asText(null);
             JsonNode receipt = txn.path("receipt");
             log.info("fetchRazorpayPaymentId: txn kind={} status={} authorization={} receipt={}",
                     kind, status, auth, receipt);
@@ -129,8 +132,21 @@ public class ShopifyOmsConnector implements OmsConnector {
                 String payId = extractPaymentIdFromAuthorization(auth);
                 if (payId != null) return payId;
             }
+
+            // Cards Onsite by 1Razorpay: receipt.payment_id holds a Shopify PaymentSession token.
+            // Collect it as last-resort fallback — same token appears in Razorpay order notes.shopify_order_id.
+            String token = receipt.path("payment_id").asText(null);
+            if (token != null && !token.isBlank() && paymentSessionToken == null) {
+                paymentSessionToken = token;
+            }
         }
-        log.warn("fetchRazorpayPaymentId: no pay_ ID found in {} transactions for shopifyOrderId={}", transactions.size(), shopifyOrderId);
+        if (paymentSessionToken != null) {
+            log.info("fetchRazorpayPaymentId: no pay_ found — returning PaymentSession token={} for shopifyOrderId={}",
+                    paymentSessionToken, shopifyOrderId);
+            return paymentSessionToken;
+        }
+        log.warn("fetchRazorpayPaymentId: no pay_ ID or PaymentSession token found in {} transactions for shopifyOrderId={}",
+                transactions.size(), shopifyOrderId);
         return null;
     }
 

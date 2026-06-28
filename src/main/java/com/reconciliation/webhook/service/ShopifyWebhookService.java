@@ -128,12 +128,19 @@ public class ShopifyWebhookService {
             }
 
             if (paymentId == null) {
-                log.info("order_transactions/create: no pay_ ID found (authorization={} gateway={}) shop={}", authorization, gateway, shopDomain);
+                log.info("order_transactions/create: no pay_ ID or PaymentSession token found (authorization={} gateway={}) shop={}", authorization, gateway, shopDomain);
                 return true;
             }
 
-            log.info("order_transactions/create: shopifyOrderId={} paymentId={} shop={}", shopifyOrderId, paymentId, shopDomain);
-            orderMatchingService.linkTransactionToOmsOrder(connection.getMerchantId(), shopifyOrderId, paymentId);
+            if (paymentId.startsWith("pay_")) {
+                log.info("order_transactions/create: shopifyOrderId={} paymentId={} shop={}", shopifyOrderId, paymentId, shopDomain);
+                orderMatchingService.linkTransactionToOmsOrder(connection.getMerchantId(), shopifyOrderId, paymentId);
+            } else {
+                // Cards Onsite by 1Razorpay: paymentId is a Shopify PaymentSession token.
+                // The same token appears in Razorpay order notes.shopify_order_id — use it to bridge order↔transaction.
+                log.info("order_transactions/create: shopifyOrderId={} paymentSessionToken={} shop={}", shopifyOrderId, paymentId, shopDomain);
+                orderMatchingService.linkTransactionToOmsOrderByToken(connection.getMerchantId(), shopifyOrderId, paymentId);
+            }
         } catch (Exception e) {
             log.error("Shopify order_transactions/create processing failed shop={}: {}", shopDomain, e.getMessage(), e);
             return false;

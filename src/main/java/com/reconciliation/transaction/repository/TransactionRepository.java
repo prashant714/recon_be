@@ -170,6 +170,19 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long> 
     List<Transaction> findCapturedWithProviderOrderIdAndNoMatchedOrder(
             @Param("cutoff") OffsetDateTime cutoff);
 
+    /** Finds a captured Razorpay payment whose notes.shopify_order_id matches the PaymentSession token. */
+    @Query(value = """
+        SELECT * FROM transactions
+        WHERE merchant_id = :merchantId
+          AND notes->>'shopify_order_id' = :token
+          AND status = 'CAPTURED'
+          AND event_type = 'PAYMENT'
+        LIMIT 1
+        """, nativeQuery = true)
+    Optional<Transaction> findCapturedByPaymentSessionToken(
+            @Param("merchantId") String merchantId,
+            @Param("token") String token);
+
     List<Transaction> findBySettlementId(String settlementId);
 
     long countByReconciliationStatus(ReconciliationStatus status);

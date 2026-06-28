@@ -296,7 +296,22 @@ public class NormalizationService {
                 .payerName(firstText(
                         p.path("name").asText(null),
                         p.path("card").path("name").asText(null)))
+                .notes(paymentNotes(p))
                 .eventOccurredAt(fromUnix(p.path("created_at").asLong()));
+    }
+
+    private Map<String, Object> paymentNotes(JsonNode p) {
+        JsonNode notesNode = p.path("notes");
+        if (notesNode.isMissingNode() || notesNode.isNull() || !notesNode.isObject()) return null;
+        Map<String, Object> result = new java.util.LinkedHashMap<>();
+        notesNode.fields().forEachRemaining(e -> {
+            JsonNode v = e.getValue();
+            if (v.isTextual()) result.put(e.getKey(), v.asText());
+            else if (v.isNumber()) result.put(e.getKey(), v.numberValue());
+            else if (v.isBoolean()) result.put(e.getKey(), v.booleanValue());
+            else result.put(e.getKey(), v.toString());
+        });
+        return result.isEmpty() ? null : result;
     }
 
     private JsonNode payment(JsonNode payload) {

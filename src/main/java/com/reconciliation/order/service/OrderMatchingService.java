@@ -159,6 +159,59 @@ public class OrderMatchingService {
         tryMatchByOrder(order);
     }
 
+    /**
+     * Called from order_transactions/create when the gateway is "Cards Onsite by 1Razorpay".
+     * The Shopify transaction receipt holds a PaymentSession token (not a pay_xxx) which also
+     * appears in the corresponding Razorpay order's notes.shopify_order_id.
+     *
+     * Timing cases:
+     *  - txn already in DB  → match immediately
+     *  - txn not yet, order exists → upgrade providerOrderId to token so resolveOrderFromRazorpayOrderNotes finds it
+     *  - txn not yet, no order → park shopifyOrderId in txn.orderId once txn arrives (handled in linkTransactionToOmsOrder)
+     *  - neither exists → log; orders/paid will retry via tryMatchByOrder when order is created
+     */
+    @Transactional
+    public void linkTransactionToOmsOrderByToken(String merchantId, String shopifyOrderId, String paymentSessionToken) {
+        Optional<Order> orderOpt = orderRepository.findByMerchantIdAndProviderOrderId(merchantId, shopifyOrderId);
+        Optional<Transaction> txnOpt = transactionRepository.findCapturedByPaymentSessionToken(merchantId, paymentSessionToken);
+
+        if (orderOpt.isEmpty()) {
+            if (txnOpt.isPresent()) {
+                // orders/paid hasn't fired yet — park shopifyOrderId in txn.orderId so tryMatchByOrder can find it
+                Transaction txn = txnOpt.get();
+                if (txn.getOrderId() == null) {
+                    txn.setOrderId(shopifyOrderId);
+                    transactionRepository.save(txn);
+                    log.info("linkTransactionToOmsOrderByToken: no order yet — pre-linked txn={} with shopifyOrderId={} via token={}",
+                            txn.getId(), shopifyOrderId, paymentSessionToken);
+                }
+            } else {
+                log.info("linkTransactionToOmsOrderByToken: no order or transaction for shopifyOrderId={} token={}",
+                        shopifyOrderId, paymentSessionToken);
+            }
+            return;
+        }
+
+        Order order = orderOpt.get();
+        if (order.getTransactionId() != null) {
+            log.debug("linkTransactionToOmsOrderByToken: order={} already matched — skipping", order.getOrderId());
+            return;
+        }
+
+        if (txnOpt.isPresent()) {
+            log.info("linkTransactionToOmsOrderByToken: matching order={} to txn={} via paymentSessionToken={}",
+                    order.getOrderId(), txnOpt.get().getId(), paymentSessionToken);
+            match(order, txnOpt.get());
+        } else {
+            // Razorpay payment.captured not yet received — upgrade providerOrderId to token so
+            // resolveOrderFromRazorpayOrderNotes can find this order when it arrives
+            log.info("linkTransactionToOmsOrderByToken: order={} providerOrderId {} → {} (awaiting payment.captured)",
+                    order.getOrderId(), shopifyOrderId, paymentSessionToken);
+            order.setProviderOrderId(paymentSessionToken);
+            orderRepository.save(order);
+        }
+    }
+
     @Transactional
     public void tryMatchByOrder(Order order) {
         Optional<Transaction> txnOpt = resolveTransaction(order);
