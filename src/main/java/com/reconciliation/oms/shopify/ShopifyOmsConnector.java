@@ -119,10 +119,23 @@ public class ShopifyOmsConnector implements OmsConnector {
         }
         if (!isRazorpay) return null;
 
+        // Shopify includes a `transactions` array directly in the webhook body — check it first.
+        // This avoids a separate API call and works even before the transactions API is updated.
+        String fromBody = extractFromTransactionNodes(orderNode.path("transactions"));
+        if (fromBody != null) {
+            log.debug("Extracted Razorpay payment ID from webhook body transactions: {}", fromBody);
+            return fromBody;
+        }
+
+        // Webhook body had no transactions or empty receipts — fall back to API call (used for polling path).
         long shopifyOrderId = orderNode.path("id").asLong();
         List<JsonNode> transactions = apiClient.fetchTransactions(connection, shopifyOrderId);
+        return extractFromTransactionNodes(objectMapper.valueToTree(transactions));
+    }
 
-        for (JsonNode txn : transactions) {
+    private String extractFromTransactionNodes(JsonNode txnArray) {
+        if (txnArray == null || !txnArray.isArray()) return null;
+        for (JsonNode txn : txnArray) {
             if (!"success".equalsIgnoreCase(txn.path("status").asText())) continue;
             String kind = txn.path("kind").asText("");
             if (!"capture".equalsIgnoreCase(kind) && !"sale".equalsIgnoreCase(kind)) continue;
@@ -135,7 +148,6 @@ public class ShopifyOmsConnector implements OmsConnector {
             String authorization = txn.path("authorization").asText(null);
             if (authorization != null && authorization.startsWith("pay_")) return authorization;
         }
-
         return null;
     }
 
