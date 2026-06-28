@@ -143,6 +143,11 @@ public class RazorpayPollingService {
         return results;
     }
 
+    /** Fetches Razorpay order notes using the default (app-level) credentials. */
+    public Map<String, String> fetchOrderNotes(String razorpayOrderId) {
+        return fetchOrderNotes(defaultKeyId, defaultKeySecret, razorpayOrderId);
+    }
+
     /**
      * Fetches the notes map from a Razorpay order. Shopify sets these notes when it creates
      * the Razorpay order during checkout — they typically contain the Shopify order reference.

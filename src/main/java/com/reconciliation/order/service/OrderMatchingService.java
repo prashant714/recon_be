@@ -75,15 +75,21 @@ public class OrderMatchingService {
 
     private Optional<Order> resolveOrderFromRazorpayOrderNotes(Transaction txn) {
         try {
+            Map<String, String> notes;
             var connections = providerConnectionService.findAllActiveByProvider("razorpay");
             var conn = connections.stream()
                     .filter(c -> txn.getMerchantId().equals(c.getMerchantId()))
                     .findFirst();
-            if (conn.isEmpty()) return Optional.empty();
-
-            String keyId     = providerConnectionService.decryptApiKey(conn.get());
-            String keySecret = providerConnectionService.decryptSecret(conn.get());
-            Map<String, String> notes = razorpayPollingService.fetchOrderNotes(keyId, keySecret, txn.getProviderOrderId());
+            if (conn.isPresent()) {
+                String keyId     = providerConnectionService.decryptApiKey(conn.get());
+                String keySecret = providerConnectionService.decryptSecret(conn.get());
+                notes = razorpayPollingService.fetchOrderNotes(keyId, keySecret, txn.getProviderOrderId());
+            } else {
+                // merchant_001 uses app-level credentials — no ProviderConnection row needed
+                log.info("resolveOrderFromRazorpayOrderNotes: no ProviderConnection for merchant={}, using default credentials",
+                        txn.getMerchantId());
+                notes = razorpayPollingService.fetchOrderNotes(txn.getProviderOrderId());
+            }
 
             // Try common keys Shopify plugins use when creating the Razorpay order
             for (String key : List.of("shopify_order_id", "shopify_order_number", "order_id", "order_number")) {
