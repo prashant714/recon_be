@@ -122,4 +122,4 @@ app:
       client-secret: ${SHOPIFY_CLIENT_SECRET:}
       webhook-secret: ${SHOPIFY_WEBHOOK_SECRET:}
       redirect-uri: ${SHOPIFY_REDIRECT_URI:https://recon-be.onrender.com/api/v1/connections/shopify/oauth/callback}
-      scopes: read_orders,read_transactions
+scopes: read_orders,read_transactions
