@@ -40,15 +40,16 @@ class OmsOrderPersistenceService {
                 log.debug("OMS update skipped for orderId={} — not an OMS order", oms.orderId());
                 return false;
             }
-            boolean gainedProviderOrderId = order.getProviderOrderId() == null && oms.providerOrderId() != null;
+            // True when we're upgrading from no payment ID (null or Shopify numeric ID) to pay_xxx
+            boolean gainedPaymentId = isPaymentId(oms.providerOrderId())
+                    && !isPaymentId(order.getProviderOrderId());
             applyUpdate(order, oms);
             orderRepository.save(order);
-            if (gainedProviderOrderId) {
-                log.info("OMS order={} gained providerOrderId={} — attempting match",
+            if (gainedPaymentId) {
+                log.info("OMS order={} upgraded providerOrderId → {} — attempting match",
                         oms.orderId(), oms.providerOrderId());
             }
-            // If we just learned the payment ID and the order isn't matched yet, try matching now
-            if (gainedProviderOrderId && order.getTransactionId() == null) {
+            if (gainedPaymentId && order.getTransactionId() == null) {
                 orderMatchingService.tryMatchByOrder(order);
             } else if (order.getTransactionId() != null) {
                 log.debug("OMS order={} already matched to transactionId={} — skipping re-match",
@@ -99,8 +100,8 @@ class OmsOrderPersistenceService {
         order.setOmsOrderStatus(oms.omsStatus());
         order.setOmsSyncedAt(OffsetDateTime.now());
         order.setOmsRawPayload(oms.rawPayload());
-        // Fill in providerOrderId if we now have the payment ID and didn't before
-        if (order.getProviderOrderId() == null && oms.providerOrderId() != null) {
+        // Upgrade providerOrderId from Shopify numeric ID to pay_xxx when we get the real payment ID
+        if (isPaymentId(oms.providerOrderId()) && !isPaymentId(order.getProviderOrderId())) {
             order.setProviderOrderId(oms.providerOrderId());
         }
         if (order.getOrderStatus() == OrderStatus.CREATED) {
@@ -116,5 +117,9 @@ class OmsOrderPersistenceService {
             case "cancelled" -> OrderStatus.CANCELLED;
             default -> OrderStatus.CREATED;
         };
+    }
+
+    private boolean isPaymentId(String value) {
+        return value != null && value.startsWith("pay_");
     }
 }

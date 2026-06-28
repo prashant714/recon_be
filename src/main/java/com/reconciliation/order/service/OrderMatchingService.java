@@ -60,6 +60,31 @@ public class OrderMatchingService {
      * Called from OrderController when an order is registered.
      * Looks up any already-captured transaction and retroactively matches.
      */
+    /**
+     * Called from order_transactions/create webhook.
+     * Finds the OMS order by its Shopify numeric ID (stored as providerOrderId),
+     * upgrades providerOrderId to the real Razorpay pay_xxx, then tries to match.
+     */
+    @Transactional
+    public void linkTransactionToOmsOrder(String merchantId, String shopifyOrderId, String paymentId) {
+        Optional<Order> orderOpt = orderRepository.findByMerchantIdAndProviderOrderId(merchantId, shopifyOrderId);
+        if (orderOpt.isEmpty()) {
+            log.info("linkTransactionToOmsOrder: order not found for shopifyOrderId={} — orders/paid may not have arrived yet, polling will reconcile",
+                    shopifyOrderId);
+            return;
+        }
+        Order order = orderOpt.get();
+        if (order.getTransactionId() != null) {
+            log.debug("linkTransactionToOmsOrder: order={} already matched — skipping", order.getOrderId());
+            return;
+        }
+        log.info("linkTransactionToOmsOrder: upgrading order={} providerOrderId {} → {}",
+                order.getOrderId(), shopifyOrderId, paymentId);
+        order.setProviderOrderId(paymentId);
+        orderRepository.save(order);
+        tryMatchByOrder(order);
+    }
+
     @Transactional
     public void tryMatchByOrder(Order order) {
         Optional<Transaction> txnOpt = resolveTransaction(order);

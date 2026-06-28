@@ -8,6 +8,7 @@ import com.reconciliation.connection.repository.ProviderConnectionRepository;
 import com.reconciliation.oms.connector.OmsOrder;
 import com.reconciliation.oms.service.OmsOrderIngestionService;
 import com.reconciliation.oms.shopify.ShopifyOmsConnector;
+import com.reconciliation.order.service.OrderMatchingService;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Base64;
@@ -28,6 +29,7 @@ public class ShopifyWebhookService {
     private final ProviderConnectionRepository connectionRepository;
     private final ShopifyOmsConnector shopifyConnector;
     private final OmsOrderIngestionService ingestionService;
+    private final OrderMatchingService orderMatchingService;
     private final ObjectMapper objectMapper;
     private final String webhookSecret;
 
@@ -35,11 +37,13 @@ public class ShopifyWebhookService {
             ProviderConnectionRepository connectionRepository,
             ShopifyOmsConnector shopifyConnector,
             OmsOrderIngestionService ingestionService,
+            OrderMatchingService orderMatchingService,
             ObjectMapper objectMapper,
             @Value("${app.oms.shopify.webhook-secret}") String webhookSecret) {
         this.connectionRepository = connectionRepository;
         this.shopifyConnector = shopifyConnector;
         this.ingestionService = ingestionService;
+        this.orderMatchingService = orderMatchingService;
         this.objectMapper = objectMapper;
         this.webhookSecret = webhookSecret;
     }
@@ -64,9 +68,13 @@ public class ShopifyWebhookService {
             return false;
         }
 
-        if (!isHandledTopic(topic)) {
+        if ("order_transactions/create".equals(topic)) {
+            return handleTransaction(rawBody, connection.getMerchantId(), shopDomain);
+        }
+
+        if (!isOrderTopic(topic)) {
             log.debug("Shopify webhook topic={} not handled — ignoring", topic);
-            return true; // return 200 so Shopify doesn't retry unhandled topics
+            return true;
         }
 
         try {
@@ -90,6 +98,45 @@ public class ShopifyWebhookService {
         return true;
     }
 
+    private boolean handleTransaction(byte[] rawBody, String merchantId, String shopDomain) {
+        try {
+            JsonNode txn = objectMapper.readTree(rawBody);
+            String kind   = txn.path("kind").asText("");
+            String status = txn.path("status").asText("");
+
+            if (!"capture".equalsIgnoreCase(kind) && !"sale".equalsIgnoreCase(kind)) return true;
+            if (!"success".equalsIgnoreCase(status)) return true;
+
+            String shopifyOrderId = txn.path("order_id").asText(null);
+            String authorization  = txn.path("authorization").asText(null);
+
+            if (shopifyOrderId == null || authorization == null) return true;
+
+            String paymentId = extractPaymentId(authorization);
+            if (paymentId == null) {
+                log.debug("order_transactions/create: no pay_ ID in authorization={} shop={}", authorization, shopDomain);
+                return true;
+            }
+
+            log.info("order_transactions/create: shopifyOrderId={} paymentId={} shop={}", shopifyOrderId, paymentId, shopDomain);
+            orderMatchingService.linkTransactionToOmsOrder(merchantId, shopifyOrderId, paymentId);
+        } catch (Exception e) {
+            log.error("Shopify order_transactions/create processing failed shop={}: {}", shopDomain, e.getMessage(), e);
+            return false;
+        }
+        return true;
+    }
+
+    // authorization field for Razorpay: "order_xxx|pay_xxx" or just "pay_xxx"
+    private String extractPaymentId(String authorization) {
+        if (authorization.contains("|")) {
+            for (String part : authorization.split("\\|")) {
+                if (part.startsWith("pay_")) return part;
+            }
+        }
+        return authorization.startsWith("pay_") ? authorization : null;
+    }
+
     // Shopify signs webhooks with HMAC-SHA256 using the webhook signing secret, Base64-encoded
     private boolean verifyHmac(byte[] rawBody, String hmacHeader, ProviderConnection connection) {
         if (hmacHeader == null || hmacHeader.isBlank()) return false;
@@ -106,9 +153,7 @@ public class ShopifyWebhookService {
         }
     }
 
-    // orders/paid fires when financial_status becomes paid
-    // orders/updated catches partial_paid and any subsequent status changes
-    private boolean isHandledTopic(String topic) {
+    private boolean isOrderTopic(String topic) {
         return "orders/paid".equals(topic) || "orders/updated".equals(topic);
     }
 }
