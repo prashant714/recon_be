@@ -4,12 +4,16 @@ import com.reconciliation.common.enums.ExceptionType;
 import com.reconciliation.common.enums.OrderStatus;
 import com.reconciliation.common.enums.ReconciliationStatus;
 import com.reconciliation.common.enums.Severity;
+import com.reconciliation.connection.service.ProviderConnectionService;
 import com.reconciliation.exception_record.service.ExceptionRecordService;
 import com.reconciliation.order.entity.Order;
 import com.reconciliation.order.repository.OrderRepository;
+import com.reconciliation.polling.service.RazorpayPollingService;
 import com.reconciliation.transaction.entity.Transaction;
 import com.reconciliation.transaction.repository.TransactionRepository;
 import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -25,6 +29,8 @@ public class OrderMatchingService {
     private final OrderRepository orderRepository;
     private final TransactionRepository transactionRepository;
     private final ExceptionRecordService exceptionRecordService;
+    private final RazorpayPollingService razorpayPollingService;
+    private final ProviderConnectionService providerConnectionService;
 
     @Value("${app.order-matching.amount-tolerance-paisa:100}")
     private long tolerancePaisa;
@@ -50,10 +56,59 @@ public class OrderMatchingService {
 
         if (orderOpt.isPresent()) {
             match(orderOpt.get(), txn);
+            return;
+        }
+
+        // Last resort: fetch the Razorpay order's notes to find the Shopify order reference.
+        // Shopify sets notes on the Razorpay order during checkout (e.g. shopify_order_id).
+        if (txn.getProviderOrderId() != null && txn.getProviderOrderId().startsWith("order_")) {
+            orderOpt = resolveOrderFromRazorpayOrderNotes(txn);
+        }
+
+        if (orderOpt.isPresent()) {
+            match(orderOpt.get(), txn);
         } else {
             log.info("tryMatchByTransaction: no order found for txn={} orderId={} providerOrderId={} providerTxnId={}",
                     txn.getId(), txn.getOrderId(), txn.getProviderOrderId(), txn.getProviderTransactionId());
         }
+    }
+
+    private Optional<Order> resolveOrderFromRazorpayOrderNotes(Transaction txn) {
+        try {
+            var connections = providerConnectionService.findAllActiveByProvider("razorpay");
+            var conn = connections.stream()
+                    .filter(c -> txn.getMerchantId().equals(c.getMerchantId()))
+                    .findFirst();
+            if (conn.isEmpty()) return Optional.empty();
+
+            String keyId     = providerConnectionService.decryptApiKey(conn.get());
+            String keySecret = providerConnectionService.decryptSecret(conn.get());
+            Map<String, String> notes = razorpayPollingService.fetchOrderNotes(keyId, keySecret, txn.getProviderOrderId());
+
+            // Try common keys Shopify plugins use when creating the Razorpay order
+            for (String key : List.of("shopify_order_id", "shopify_order_number", "order_id", "order_number")) {
+                String value = notes.get(key);
+                if (value == null || value.isBlank()) continue;
+
+                // Shopify numeric ID (e.g. "6730304258095")
+                Optional<Order> found = orderRepository.findByMerchantIdAndProviderOrderId(txn.getMerchantId(), value);
+                if (found.isPresent()) {
+                    log.info("resolveOrderFromRazorpayOrderNotes: matched order={} via notes.{}={}",
+                            found.get().getOrderId(), key, value);
+                    return found;
+                }
+                // Shopify order name (e.g. "#1011")
+                found = orderRepository.findByMerchantIdAndOrderId(txn.getMerchantId(), value);
+                if (found.isPresent()) {
+                    log.info("resolveOrderFromRazorpayOrderNotes: matched order={} via notes.{}={}",
+                            found.get().getOrderId(), key, value);
+                    return found;
+                }
+            }
+        } catch (Exception e) {
+            log.warn("resolveOrderFromRazorpayOrderNotes failed for txn={}: {}", txn.getId(), e.getMessage());
+        }
+        return Optional.empty();
     }
 
     /**

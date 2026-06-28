@@ -143,6 +143,31 @@ public class RazorpayPollingService {
         return results;
     }
 
+    /**
+     * Fetches the notes map from a Razorpay order. Shopify sets these notes when it creates
+     * the Razorpay order during checkout — they typically contain the Shopify order reference.
+     */
+    public Map<String, String> fetchOrderNotes(String keyId, String keySecret, String razorpayOrderId) {
+        RazorpayClient client = createClient(keyId, keySecret);
+        if (client == null) return Map.of();
+        try {
+            com.razorpay.Order order = client.orders.fetch(razorpayOrderId);
+            org.json.JSONObject json = order.toJson();
+            org.json.JSONObject notes = json.optJSONObject("notes");
+            log.info("Razorpay order={} receipt={} notes={}", razorpayOrderId,
+                    json.optString("receipt", null), notes);
+            if (notes == null) return Map.of();
+            Map<String, String> result = new LinkedHashMap<>();
+            for (String key : notes.keySet()) {
+                result.put(key, notes.optString(key));
+            }
+            return result;
+        } catch (Exception e) {
+            log.warn("Failed to fetch Razorpay order {}: {}", razorpayOrderId, e.getMessage());
+            return Map.of();
+        }
+    }
+
     private RazorpayClient createClient(String keyId, String keySecret) {
         if (!hasText(keyId) || !hasText(keySecret)
                 || keyId.contains("placeholder") || keySecret.contains("placeholder")) {
