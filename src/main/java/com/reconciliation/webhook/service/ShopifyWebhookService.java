@@ -103,18 +103,26 @@ public class ShopifyWebhookService {
             JsonNode txn = objectMapper.readTree(rawBody);
             String kind   = txn.path("kind").asText("");
             String status = txn.path("status").asText("");
-
-            if (!"capture".equalsIgnoreCase(kind) && !"sale".equalsIgnoreCase(kind)) return true;
-            if (!"success".equalsIgnoreCase(status)) return true;
-
             String shopifyOrderId = txn.path("order_id").asText(null);
             String authorization  = txn.path("authorization").asText(null);
+
+            log.info("order_transactions/create: received kind={} status={} shopifyOrderId={} authorization={} shop={}",
+                    kind, status, shopifyOrderId, authorization, shopDomain);
+
+            if (!"capture".equalsIgnoreCase(kind) && !"sale".equalsIgnoreCase(kind)) {
+                log.info("order_transactions/create: skipping kind={} (not capture/sale)", kind);
+                return true;
+            }
+            if (!"success".equalsIgnoreCase(status)) {
+                log.info("order_transactions/create: skipping status={} (not success)", status);
+                return true;
+            }
 
             if (shopifyOrderId == null || authorization == null) return true;
 
             String paymentId = extractPaymentId(authorization);
             if (paymentId == null) {
-                log.debug("order_transactions/create: no pay_ ID in authorization={} shop={}", authorization, shopDomain);
+                log.info("order_transactions/create: no pay_ ID in authorization={} shop={}", authorization, shopDomain);
                 return true;
             }
 

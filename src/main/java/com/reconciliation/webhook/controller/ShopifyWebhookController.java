@@ -29,6 +29,9 @@ public class ShopifyWebhookController {
 
         byte[] rawBody = request.getInputStream().readAllBytes();
 
+        log.info("Shopify webhook received topic={} shop={} hmacPresent={} bodyBytes={}",
+                topic, shopDomain, hmac != null, rawBody.length);
+
         if (shopDomain == null || shopDomain.isBlank()) {
             log.warn("Shopify webhook missing X-Shopify-Shop-Domain header");
             return ResponseEntity.badRequest().body("Missing shop domain");

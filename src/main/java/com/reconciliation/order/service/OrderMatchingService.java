@@ -69,8 +69,21 @@ public class OrderMatchingService {
     public void linkTransactionToOmsOrder(String merchantId, String shopifyOrderId, String paymentId) {
         Optional<Order> orderOpt = orderRepository.findByMerchantIdAndProviderOrderId(merchantId, shopifyOrderId);
         if (orderOpt.isEmpty()) {
-            log.info("linkTransactionToOmsOrder: order not found for shopifyOrderId={} — orders/paid may not have arrived yet, polling will reconcile",
-                    shopifyOrderId);
+            // order_transactions/create arrived before orders/paid — pre-link by parking shopifyOrderId on the transaction
+            // so resolveTransaction() can find it when the order is eventually created
+            Optional<Transaction> txnOpt = transactionRepository.findPaymentByProviderTransactionId("razorpay", merchantId, paymentId);
+            if (txnOpt.isPresent()) {
+                Transaction txn = txnOpt.get();
+                if (txn.getOrderId() == null) {
+                    txn.setOrderId(shopifyOrderId);
+                    transactionRepository.save(txn);
+                    log.info("linkTransactionToOmsOrder: order not found yet — pre-linked txn={} with shopifyOrderId={} (will match when orders/paid arrives)",
+                            paymentId, shopifyOrderId);
+                }
+            } else {
+                log.info("linkTransactionToOmsOrder: order not found for shopifyOrderId={} and transaction not found for paymentId={}",
+                        shopifyOrderId, paymentId);
+            }
             return;
         }
         Order order = orderOpt.get();
@@ -179,6 +192,12 @@ public class OrderMatchingService {
                     .or(() -> transactionRepository.findByProviderAndMerchantIdAndProviderOrderId(
                             "stripe", order.getMerchantId(), order.getProviderOrderId()));
             if (byProviderOrder.isPresent()) return byProviderOrder;
+
+            // Race-condition path: order_transactions/create arrived before orders/paid and parked
+            // the shopifyOrderId in txn.orderId — find it here so the match can complete
+            Optional<Transaction> byShopifyId = transactionRepository.findFirstCapturedByMerchantIdAndOrderId(
+                    order.getMerchantId(), order.getProviderOrderId());
+            if (byShopifyId.isPresent()) return byShopifyId;
         }
         if (order.getOrderId() != null) {
             return transactionRepository.findFirstCapturedByMerchantIdAndOrderId(

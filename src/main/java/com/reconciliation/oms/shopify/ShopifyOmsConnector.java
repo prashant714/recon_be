@@ -133,12 +133,24 @@ public class ShopifyOmsConnector implements OmsConnector {
             String fromReceipt = txn.path("receipt").path("razorpay_payment_id").asText(null);
             if (fromReceipt != null && fromReceipt.startsWith("pay_")) return fromReceipt;
 
-            // Fallback: Shopify also puts the gateway's auth code in authorization
+            // Fallback: Shopify also puts the gateway's auth code in authorization (pay_xxx or order_xxx|pay_xxx)
             String authorization = txn.path("authorization").asText(null);
-            if (authorization != null && authorization.startsWith("pay_")) return authorization;
+            if (authorization != null) {
+                String payId = extractPaymentIdFromAuthorization(authorization);
+                if (payId != null) return payId;
+            }
         }
 
         return null;
+    }
+
+    private String extractPaymentIdFromAuthorization(String authorization) {
+        if (authorization.contains("|")) {
+            for (String part : authorization.split("\\|")) {
+                if (part.startsWith("pay_")) return part;
+            }
+        }
+        return authorization.startsWith("pay_") ? authorization : null;
     }
 
     private OffsetDateTime parseDate(String dateStr) {
